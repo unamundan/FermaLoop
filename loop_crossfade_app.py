@@ -1479,6 +1479,7 @@ class LoopCrossfadeGUI:
         self._click_flag = None       # (x_pixel, time_str) or None
         self._click_flag_after_id = None
         self._live_update_after_id = None
+        self._canvas_tooltip = None
 
         for var in (self.xfade_var, self.curve_var, self.auto_xfade_var,
                     self.snap_var, self.window_var):
@@ -1544,12 +1545,19 @@ class LoopCrossfadeGUI:
     def _make_icon_button(self, parent, icon_name, tooltip_text, command, size=None, style="Icon.TButton"):
         """Icon-only button with a hover tooltip -- falls back to a short
         text label if Pillow isn't installed, so the button never ends up
-        blank."""
+        blank. takefocus=0 is important here: a ttk.Button that currently
+        holds keyboard focus (which it gets automatically on click) has
+        its OWN built-in binding that invokes it on <space> -- separate
+        from and in addition to the app's global <space> shortcut. Without
+        this, clicking Play then pressing Space called on_play_pause()
+        TWICE for one keypress (once from the button's own focus-triggered
+        invoke, once from the global shortcut), which looked like a brief
+        stop-and-restart or an unexpected jump."""
         photo = self._get_icon(icon_name, size)
         if photo is not None:
-            btn = self.ttk.Button(parent, image=photo, style=style, command=command)
+            btn = self.ttk.Button(parent, image=photo, style=style, command=command, takefocus=0)
         else:
-            btn = self.ttk.Button(parent, text=tooltip_text, style=style, command=command)
+            btn = self.ttk.Button(parent, text=tooltip_text, style=style, command=command, takefocus=0)
         self._last_tooltip = ToolTip(btn, tooltip_text)
         return btn
 
@@ -1627,7 +1635,7 @@ class LoopCrossfadeGUI:
         in_entry = RoundedEntry(row, self.in_path_var, BG, FIELD_BG, FG, BORDER)
         in_entry.pack(side="left", fill="x", expand=True, padx=6)
         ToolTip(in_entry.frame, "Path to the audio file to load")
-        btn_browse_in = ttk.Button(row, text="Browse", command=self.choose_input)
+        btn_browse_in = ttk.Button(row, text="Browse", command=self.choose_input, takefocus=0)
         btn_browse_in.pack(side="left")
         ToolTip(btn_browse_in, "Choose an audio file from disk")
 
@@ -1636,7 +1644,7 @@ class LoopCrossfadeGUI:
         out_entry = RoundedEntry(row, self.out_path_var, BG, FIELD_BG, FG, BORDER)
         out_entry.pack(side="left", fill="x", expand=True, padx=6)
         ToolTip(out_entry.frame, "Where the processed loop will be saved")
-        btn_browse_out = ttk.Button(row, text="Browse", command=self.choose_output)
+        btn_browse_out = ttk.Button(row, text="Browse", command=self.choose_output, takefocus=0)
         btn_browse_out.pack(side="left")
         ToolTip(btn_browse_out, "Choose where to save the processed file")
 
@@ -1749,7 +1757,7 @@ class LoopCrossfadeGUI:
         ttk.Frame(outer, height=1, style="Panel.TFrame").pack(fill="x", pady=14)
 
         btn_process = ttk.Button(outer, text="Process & Save", style="Accent.TButton",
-                   command=self.run_process)
+                   command=self.run_process, takefocus=0)
         btn_process.pack(fill="x", pady=(0, 10))
         ToolTip(btn_process, "Crossfade the current selection and save it to the 'Save as' path")
 
@@ -1965,6 +1973,68 @@ class LoopCrossfadeGUI:
         self.timeline_canvas.create_text(box_x + box_w / 2, 7, text=text, fill="#ffffff",
                                           font=("Segoe UI", 8, "bold"))
 
+    CLOSE_BTN_SIZE = 18
+    CLOSE_BTN_MARGIN = 8
+
+    def _close_button_bbox(self, canvas_width):
+        x2 = canvas_width - self.CLOSE_BTN_MARGIN
+        x1 = x2 - self.CLOSE_BTN_SIZE
+        y1 = self.CLOSE_BTN_MARGIN
+        y2 = y1 + self.CLOSE_BTN_SIZE
+        return x1, y1, x2, y2
+
+    def _draw_close_button(self, w):
+        x1, y1, x2, y2 = self._close_button_bbox(w)
+        self.canvas.create_oval(x1, y1, x2, y2, fill=PANEL, outline=BORDER, tags="close_btn")
+        pad = self.CLOSE_BTN_SIZE * 0.28
+        self.canvas.create_line(x1 + pad, y1 + pad, x2 - pad, y2 - pad, fill=MUTED, width=2, tags="close_btn")
+        self.canvas.create_line(x2 - pad, y1 + pad, x1 + pad, y2 - pad, fill=MUTED, width=2, tags="close_btn")
+        self.canvas.tag_bind("close_btn", "<Enter>", self._on_close_btn_enter)
+        self.canvas.tag_bind("close_btn", "<Leave>", lambda e: self._hide_canvas_tooltip())
+
+    def _on_close_btn_enter(self, event):
+        self._show_canvas_tooltip("Unload the current audio file",
+                                   self.canvas.winfo_rootx() + event.x,
+                                   self.canvas.winfo_rooty() + event.y)
+
+    def _show_canvas_tooltip(self, text, x_root, y_root):
+        self._hide_canvas_tooltip()
+        self._canvas_tooltip = self.tk.Toplevel(self.canvas)
+        self._canvas_tooltip.wm_overrideredirect(True)
+        try:
+            self._canvas_tooltip.wm_attributes("-topmost", True)
+        except Exception:
+            pass
+        self._canvas_tooltip.wm_geometry(f"+{x_root + 12}+{y_root + 12}")
+        self.tk.Label(self._canvas_tooltip, text=text, bg="#111214", fg="#e6e6e8",
+                      font=("Segoe UI", 9), padx=8, pady=4, relief="solid", borderwidth=1).pack()
+
+    def _hide_canvas_tooltip(self):
+        if getattr(self, "_canvas_tooltip", None) is not None:
+            try:
+                self._canvas_tooltip.destroy()
+            except Exception:
+                pass
+            self._canvas_tooltip = None
+
+    def unload_file(self):
+        self._hide_canvas_tooltip()
+        self._exit_preview_mode()
+        self.player.stop()
+        self.data = None
+        self.loaded_path = None
+        self.sel_start = self.sel_end = 0
+        self.zoom_start = self.zoom_end = 0
+        self.cropped = False
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.in_path_var.set("")
+        self.out_path_var.set("")
+        self.time_var.set("00:00.000")
+        self._update_selection_duration_label()
+        self._redraw()
+        self.status_var.set("Unloaded. Drag & drop an audio file, or click Browse.")
+
     def _redraw_waveform(self):
         if self.data is None:
             self._draw_placeholder()
@@ -1997,6 +2067,8 @@ class LoopCrossfadeGUI:
         cursor = self._display_cursor_sample()
         cx = self._sample_to_x(cursor, w)
         self.canvas.create_line(cx, 0, cx, h, fill=PLAYHEAD_COLOR, width=1, tags="playhead")
+
+        self._draw_close_button(w)
 
     def _sample_to_x(self, sample, width=None):
         width = width or self.canvas.winfo_width() or self.canvas_width
@@ -2037,6 +2109,10 @@ class LoopCrossfadeGUI:
         if self.data is None:
             return
         w = self.canvas.winfo_width()
+        x1, y1, x2, y2 = self._close_button_bbox(w)
+        if x1 <= event.x <= x2 and y1 <= event.y <= y2:
+            self.unload_file()
+            return
         sx = self._sample_to_x(self.sel_start, w)
         ex = self._sample_to_x(self.sel_end, w)
         self.pre_drag_selection = (self.sel_start, self.sel_end)
@@ -2653,28 +2729,62 @@ class LoopCrossfadeGUI:
         for name, btn in rows.items():
             btn.configure(command=lambda n=name, b=rows[n]: start_listening(n, b))
 
+        ttk.Button(dlg, text="Done", command=lambda: on_close(), style="Accent.TButton").grid(
+            row=len(rows), column=0, columnspan=2, pady=16, padx=10, sticky="ew")
+
+        # ---- size (as before) ----
+        dlg.update_idletasks()
+        required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        saved = self.window_sizes.get("shortcuts", {})
+        w, h = resolve_window_size(required_w, required_h, saved)
+        dlg.minsize(required_w, required_h)
+
+        # ---- "magnetized" position: follows the main window as it moves,
+        # remembering the offset between them (not an absolute screen spot,
+        # since that wouldn't make sense once the main window has moved) ----
+        offset = [saved.get("offset_x", 40), saved.get("offset_y", 60)]
+        programmatic_move = {"flag": False}
+
+        def apply_geometry():
+            programmatic_move["flag"] = True
+            x = self.root.winfo_x() + offset[0]
+            y = self.root.winfo_y() + offset[1]
+            dlg.geometry(f"{w}x{h}+{x}+{y}")
+
+        def on_root_configure(event=None):
+            if dlg.winfo_exists():
+                apply_geometry()
+
+        def on_dialog_configure(event=None):
+            if programmatic_move["flag"]:
+                programmatic_move["flag"] = False
+                return
+            # the user dragged the dialog itself -- adopt the new offset so
+            # it keeps following from wherever they put it, not snapping back
+            offset[0] = dlg.winfo_x() - self.root.winfo_x()
+            offset[1] = dlg.winfo_y() - self.root.winfo_y()
+
+        apply_geometry()
+        root_binding = self.root.bind("<Configure>", on_root_configure, add="+")
+        dlg.bind("<Configure>", on_dialog_configure, add="+")
+
         def on_close():
             save_shortcuts(self.shortcuts)
             try:
+                self.root.unbind("<Configure>", root_binding)
+            except Exception:
+                pass
+            try:
                 self.window_sizes["shortcuts"] = {
-                    "width": dlg.winfo_width(),
-                    "height": dlg.winfo_height(),
+                    "width": dlg.winfo_width(), "height": dlg.winfo_height(),
+                    "offset_x": offset[0], "offset_y": offset[1],
                 }
                 save_window_sizes(self.window_sizes)
             except Exception:
                 pass
             dlg.destroy()
 
-        ttk.Button(dlg, text="Done", command=on_close, style="Accent.TButton").grid(
-            row=len(rows), column=0, columnspan=2, pady=16, padx=10, sticky="ew")
         dlg.protocol("WM_DELETE_WINDOW", on_close)
-
-        dlg.update_idletasks()
-        required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
-        saved = self.window_sizes.get("shortcuts")
-        w, h = resolve_window_size(required_w, required_h, saved)
-        dlg.geometry(f"{w}x{h}")
-        dlg.minsize(required_w, required_h)
 
     # ---------------- process & save ----------------
 
