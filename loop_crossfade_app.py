@@ -764,6 +764,26 @@ def _hex_to_rgb(hex_color):
     return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
 
 
+def format_time(seconds):
+    """MM:SS.mmm"""
+    seconds = max(0.0, seconds)
+    m = int(seconds // 60)
+    s = seconds - m * 60
+    return f"{m:02d}:{s:06.3f}"
+
+
+def pick_tick_interval(span_sec, target_ticks=8):
+    """Chooses a 'nice' timeline tick spacing (in seconds) for a given
+    visible time span, aiming for roughly target_ticks marks."""
+    candidates = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+                  1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+    raw = span_sec / target_ticks
+    for c in candidates:
+        if c >= raw:
+            return c
+    return candidates[-1]
+
+
 def render_waveform_image(data, w, h, bg_hex, wave_hex, supersample=3):
     """Renders a waveform envelope as a supersampled-then-downsampled PIL
     Image for smooth (anti-aliased) edges, instead of many individual
@@ -781,6 +801,40 @@ def render_waveform_image(data, w, h, bg_hex, wave_hex, supersample=3):
     return img.resize((w, h), Image.LANCZOS)
 
 
+def render_rounded_box_image(w, h, radius, fill_hex, border_hex, supersample=4):
+    """Anti-aliased rounded rectangle, for entry/panel backgrounds. Plain
+    canvas create_polygon(smooth=True) isn't actually anti-aliased and
+    looks jaggy at small sizes -- rendering via PIL and downsampling is."""
+    w, h = max(1, int(w)), max(1, int(h))
+    sw, sh = w * supersample, h * supersample
+    img = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([0, 0, sw - 1, sh - 1], radius=radius * supersample,
+                            fill=_hex_to_rgb(fill_hex) + (255,),
+                            outline=_hex_to_rgb(border_hex) + (255,), width=max(1, supersample))
+    return img.resize((w, h), Image.LANCZOS)
+
+
+def render_checkbox_image(w, h, radius, checked, field_bg_hex, accent_hex, border_hex,
+                           check_hex="#ffffff", supersample=4):
+    """Anti-aliased rounded checkbox indicator with a smooth checkmark
+    stroke (the hand-drawn canvas version looked jaggy/misshapen)."""
+    w, h = max(1, int(w)), max(1, int(h))
+    sw, sh = w * supersample, h * supersample
+    img = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    fill = _hex_to_rgb(accent_hex) if checked else _hex_to_rgb(field_bg_hex)
+    draw.rounded_rectangle([0, 0, sw - 1, sh - 1], radius=radius * supersample,
+                            fill=fill + (255,), outline=_hex_to_rgb(border_hex) + (255,),
+                            width=max(1, supersample))
+    if checked:
+        pts = [(w * 0.22 * supersample, h * 0.52 * supersample),
+               (w * 0.42 * supersample, h * 0.72 * supersample),
+               (w * 0.8 * supersample, h * 0.28 * supersample)]
+        draw.line(pts, fill=_hex_to_rgb(check_hex) + (255,), width=max(2, supersample), joint="curve")
+    return img.resize((w, h), Image.LANCZOS)
+
+
 def _rounded_rect_points(w, h, r):
     r = min(r, w / 2, h / 2)
     return [r, 0, w - r, 0, w, 0, w, r, w, h - r, w, h,
@@ -788,21 +842,23 @@ def _rounded_rect_points(w, h, r):
 
 
 class RoundedEntry:
-    """A ttk.Entry substitute with actual rounded corners, drawn on a
-    Canvas (Tk/ttk widgets can't do this natively without theme images).
-    Resizes responsively via <Configure>."""
+    """A ttk.Entry substitute with actual rounded, anti-aliased corners
+    (drawn via PIL when available; falls back to a canvas polygon, which
+    looks blockier since Tk's canvas doesn't anti-alias, if Pillow isn't
+    installed). Resizes responsively via <Configure>."""
 
     def __init__(self, parent, textvariable, bg, field_bg, fg, border, height=32, radius=10):
         import tkinter as tk
         self.tk = tk
         self.radius = radius
-        self.field_bg, self.border, self.fg = field_bg, border, fg
+        self.bg, self.field_bg, self.border, self.fg = bg, field_bg, border, fg
         self.frame = tk.Frame(parent, bg=bg)
         self.canvas = tk.Canvas(self.frame, height=height, bg=bg, highlightthickness=0)
         self.canvas.pack(fill="x", expand=True)
         self.entry = tk.Entry(self.canvas, textvariable=textvariable, bg=field_bg, fg=fg,
                                insertbackground=fg, relief="flat", highlightthickness=0,
                                bd=0, font=("Segoe UI", 10))
+        self._bg_photo = None
         self.canvas.bind("<Configure>", self._redraw)
 
     def _redraw(self, event=None):
@@ -811,9 +867,14 @@ class RoundedEntry:
         if w < 2 or h < 2:
             return
         self.canvas.delete("bg")
-        pts = _rounded_rect_points(w, h, self.radius)
-        self.canvas.create_polygon(pts, smooth=True, fill=self.field_bg,
-                                    outline=self.border, tags="bg")
+        if PIL_AVAILABLE:
+            img = render_rounded_box_image(w, h, self.radius, self.field_bg, self.border)
+            self._bg_photo = ImageTk.PhotoImage(img)
+            self.canvas.create_image(0, 0, anchor="nw", image=self._bg_photo, tags="bg")
+        else:
+            pts = _rounded_rect_points(w, h, self.radius)
+            self.canvas.create_polygon(pts, smooth=True, fill=self.field_bg,
+                                        outline=self.border, tags="bg")
         self.canvas.tag_lower("bg")
         self.canvas.delete("entrywin")
         self.canvas.create_window(self.radius, h / 2, window=self.entry, anchor="w",
@@ -824,8 +885,9 @@ class RoundedEntry:
 
 
 class RoundedCheckbutton:
-    """A ttk.Checkbutton substitute with a rounded box indicator instead
-    of the theme's square one."""
+    """A ttk.Checkbutton substitute with an anti-aliased rounded box
+    indicator and a smooth checkmark stroke (drawn via PIL when
+    available)."""
 
     def __init__(self, parent, text, variable, bg, fg, field_bg, accent, border,
                  command=None, box=18, radius=5):
@@ -834,6 +896,7 @@ class RoundedCheckbutton:
         self.variable, self.command = variable, command
         self.box, self.radius = box, radius
         self.bg, self.fg, self.field_bg, self.accent, self.border = bg, fg, field_bg, accent, border
+        self._photo = None
 
         self.frame = tk.Frame(parent, bg=bg)
         self.canvas = tk.Canvas(self.frame, width=box, height=box, bg=bg, highlightthickness=0)
@@ -847,12 +910,18 @@ class RoundedCheckbutton:
     def _draw(self):
         self.canvas.delete("all")
         w = h = self.box
-        pts = _rounded_rect_points(w, h, self.radius)
-        fill = self.accent if self.variable.get() else self.field_bg
-        self.canvas.create_polygon(pts, smooth=True, fill=fill, outline=self.border)
-        if self.variable.get():
-            self.canvas.create_line(w * 0.22, h * 0.52, w * 0.42, h * 0.72, w * 0.8, h * 0.28,
-                                     fill="#ffffff", width=2, capstyle="round", joinstyle="round")
+        checked = self.variable.get()
+        if PIL_AVAILABLE:
+            img = render_checkbox_image(w, h, self.radius, checked, self.field_bg, self.accent, self.border)
+            self._photo = ImageTk.PhotoImage(img)
+            self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
+        else:
+            pts = _rounded_rect_points(w, h, self.radius)
+            fill = self.accent if checked else self.field_bg
+            self.canvas.create_polygon(pts, smooth=True, fill=fill, outline=self.border)
+            if checked:
+                self.canvas.create_line(w * 0.22, h * 0.52, w * 0.42, h * 0.72, w * 0.8, h * 0.28,
+                                         fill="#ffffff", width=2, capstyle="round", joinstyle="round")
 
     def _toggle(self, event=None):
         self.variable.set(not self.variable.get())
@@ -913,6 +982,10 @@ class LoopCrossfadeGUI:
         self.loop_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Drag an audio file onto this window, or click Browse.")
         self.play_label_var = tk.StringVar(value="Play")
+        self.time_var = tk.StringVar(value="00:00.000")
+        self.selection_duration_var = tk.StringVar(value="Selection: --")
+        self._click_flag = None       # (x_pixel, time_str) or None
+        self._click_flag_after_id = None
 
         self._build_widgets()
         self._bind_shortcuts()
@@ -971,9 +1044,14 @@ class LoopCrossfadeGUI:
         out_entry.pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row, text="Browse", command=self.choose_output).pack(side="left")
 
+        # timeline ruler (shared coordinate space with the waveform below)
+        self.timeline_canvas = tk.Canvas(outer, height=22, bg=BG, highlightthickness=0)
+        self.timeline_canvas.pack(fill="x", pady=(12, 0))
+        self.timeline_canvas.bind("<Configure>", lambda e: self._redraw())
+
         # waveform canvas
         canvas_frame = ttk.Frame(outer, style="Panel.TFrame")
-        canvas_frame.pack(fill="x", pady=(12, 4))
+        canvas_frame.pack(fill="x", pady=(0, 4))
         self.canvas = tk.Canvas(canvas_frame, height=self.canvas_height, bg=PANEL,
                                  highlightthickness=0)
         self.canvas.pack(fill="x", expand=True, padx=4, pady=4)
@@ -986,14 +1064,18 @@ class LoopCrossfadeGUI:
         self.canvas.bind("<Button-5>", self._on_mousewheel)       # Linux scroll down
         self._draw_placeholder()
 
+        # timer + selection duration readouts
+        info_row = ttk.Frame(outer); info_row.pack(fill="x", pady=(2, 4))
+        ttk.Label(info_row, textvariable=self.time_var, style="Muted.TLabel",
+                  font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Label(info_row, textvariable=self.selection_duration_var, style="Muted.TLabel").pack(side="right")
+
         ttk.Label(outer, text="Drag to select, drag edges to adjust, click to move the playhead. Scroll to zoom.",
                   style="Muted.TLabel").pack(anchor="w", pady=(0, 4))
 
         # zoom row
         zoom_row = ttk.Frame(outer); zoom_row.pack(fill="x", pady=(0, 8))
-        ttk.Button(zoom_row, text="Zoom In", command=lambda: self._zoom_step(1)).pack(side="left", padx=(0, 4))
-        ttk.Button(zoom_row, text="Zoom Out", command=lambda: self._zoom_step(-1)).pack(side="left", padx=4)
-        ttk.Button(zoom_row, text="Zoom to Selection", command=self.zoom_to_selection).pack(side="left", padx=4)
+        ttk.Button(zoom_row, text="Zoom to Selection", command=self.zoom_to_selection).pack(side="left", padx=(0, 4))
         ttk.Button(zoom_row, text="Zoom to Fit", command=self.zoom_to_fit).pack(side="left", padx=4)
         ttk.Button(zoom_row, text="\u21b6 Undo", command=self.undo).pack(side="right", padx=4)
         ttk.Button(zoom_row, text="\u21b7 Redo", command=self.redo).pack(side="right", padx=(4, 0))
@@ -1128,7 +1210,9 @@ class LoopCrossfadeGUI:
         root_name, ext = os.path.splitext(path)
         self.out_path_var.set(root_name + "_loop" + ext)
 
-        self._redraw_waveform()
+        self._click_flag = None
+        self._redraw()
+        self._update_selection_duration_label()
         dur = len(data) / sr
         self.status_var.set(f"Loaded {os.path.basename(path)} ({dur:.2f}s). Select a region, Audition to preview the loop, then Process & Save.")
 
@@ -1146,7 +1230,8 @@ class LoopCrossfadeGUI:
         self.preview_mode = False
         self.player.load(self.data, self.sr)
         self.player.set_selection(self.sel_start, self.sel_end)
-        self._redraw_waveform()
+        self._redraw()
+        self._update_selection_duration_label()
 
     def push_undo(self):
         self.undo_stack.append(self._snapshot())
@@ -1174,18 +1259,75 @@ class LoopCrossfadeGUI:
         h = self.canvas.winfo_height() or self.canvas_height
         self.canvas.create_text(w // 2, h // 2, text="No audio loaded",
                                  fill=MUTED, font=("Segoe UI", 10))
+        self.timeline_canvas.delete("all")
 
     def _on_canvas_resize(self, event):
         self.canvas_width, self.canvas_height = event.width, event.height
-        if self.data is not None:
-            self._redraw_waveform()
-        else:
-            self._draw_placeholder()
+        self._redraw()
 
     def _visible_range(self):
         if self.data is None:
             return 0, 0
         return self.zoom_start, self.zoom_end
+
+    def _display_cursor_sample(self):
+        """Maps the player's cursor into self.data-space for on-screen
+        display. In preview mode the player holds a shorter, processed
+        buffer derived from [sel_start, sel_end) rather than self.data
+        itself -- without this mapping the playhead would be drawn using
+        the wrong buffer's coordinate space and appear stuck near the
+        start of the file regardless of actual (correct) playback
+        position -- that was the reported "jumps to the beginning" bug."""
+        cursor = self.player.get_cursor()
+        if not self.preview_mode or self.player.data is None:
+            return cursor
+        total = max(1, self.player.data.shape[0])
+        frac = min(1.0, cursor / total)
+        return int(self.sel_start + frac * (self.sel_end - self.sel_start))
+
+    def _redraw(self):
+        """Single entry point that keeps the timeline ruler and the
+        waveform in sync -- call this instead of the two draw methods
+        directly."""
+        self._redraw_timeline()
+        self._redraw_waveform()
+
+    def _redraw_timeline(self):
+        self.timeline_canvas.delete("all")
+        if self.data is None:
+            return
+        w = max(1, self.timeline_canvas.winfo_width() or self.canvas_width)
+        h = max(1, self.timeline_canvas.winfo_height() or 22)
+        vs, ve = self._visible_range()
+        span_sec = max(1e-6, (ve - vs) / self.sr)
+        interval = pick_tick_interval(span_sec)
+
+        first_tick = (int(vs / self.sr / interval)) * interval
+        t = first_tick
+        while t <= ve / self.sr + interval:
+            samp = t * self.sr
+            x = self._sample_to_x(samp, w)
+            if -20 <= x <= w + 20:
+                self.timeline_canvas.create_line(x, h - 6, x, h, fill=MUTED)
+                label = format_time(t) if interval < 1 else f"{int(t // 60):02d}:{int(t % 60):02d}"
+                self.timeline_canvas.create_text(x, h - 8, text=label, fill=MUTED,
+                                                  font=("Segoe UI", 8), anchor="s")
+            t += interval
+
+        if self._click_flag is not None:
+            fx, ftext = self._click_flag
+            self._draw_flag(fx, ftext, w)
+
+    def _draw_flag(self, x, text, canvas_w):
+        pad_x, pad_y = 6, 3
+        text_w = 7 * len(text)  # rough monospace-ish estimate, good enough for a small flag
+        box_w = text_w + pad_x * 2
+        box_x = max(2, min(canvas_w - box_w - 2, x - box_w / 2))
+        self.timeline_canvas.create_rectangle(box_x, 0, box_x + box_w, 14,
+                                               fill=ACCENT, outline="")
+        self.timeline_canvas.create_polygon(x - 4, 14, x + 4, 14, x, 18, fill=ACCENT, outline="")
+        self.timeline_canvas.create_text(box_x + box_w / 2, 7, text=text, fill="#ffffff",
+                                          font=("Segoe UI", 8, "bold"))
 
     def _redraw_waveform(self):
         if self.data is None:
@@ -1216,7 +1358,7 @@ class LoopCrossfadeGUI:
         self.canvas.create_line(sx, 0, sx, h, fill=HANDLE_COLOR, width=2, tags="handle_start")
         self.canvas.create_line(ex, 0, ex, h, fill=HANDLE_COLOR, width=2, tags="handle_end")
 
-        cursor = self.player.get_cursor()
+        cursor = self._display_cursor_sample()
         cx = self._sample_to_x(cursor, w)
         self.canvas.create_line(cx, 0, cx, h, fill=PLAYHEAD_COLOR, width=1, tags="playhead")
 
@@ -1235,6 +1377,25 @@ class LoopCrossfadeGUI:
             return vs
         frac = max(0.0, min(1.0, x / width))
         return int(vs + frac * span)
+
+    def _update_selection_duration_label(self):
+        if self.data is None or self.sel_end <= self.sel_start:
+            self.selection_duration_var.set("Selection: --")
+        else:
+            dur = (self.sel_end - self.sel_start) / self.sr
+            self.selection_duration_var.set(f"Selection: {format_time(dur)}")
+
+    def _show_click_flag(self, x_pixel, sample):
+        t = sample / self.sr
+        self._click_flag = (x_pixel, format_time(t))
+        if self._click_flag_after_id is not None:
+            self.root.after_cancel(self._click_flag_after_id)
+        self._click_flag_after_id = self.root.after(1500, self._clear_click_flag)
+
+    def _clear_click_flag(self):
+        self._click_flag = None
+        self._click_flag_after_id = None
+        self._redraw_timeline()
 
     def _on_canvas_press(self, event):
         if self.data is None:
@@ -1272,7 +1433,8 @@ class LoopCrossfadeGUI:
             self.sel_start, self.sel_end = min(anchor_samp, samp), max(anchor_samp, samp)
 
         if self.drag_mode in ("start", "end", "new"):
-            self._redraw_waveform()
+            self._update_selection_duration_label()
+            self._redraw()
 
     def _on_canvas_release(self, event):
         if self.data is None:
@@ -1280,12 +1442,14 @@ class LoopCrossfadeGUI:
             return
         if self.drag_mode == "pending":
             # a plain click (no meaningful drag): move the playhead there
+            # and show a time flag on the timeline
             w = self.canvas.winfo_width()
             samp = self._x_to_sample(event.x, w)
             self.player.rewind()  # ensure stopped state doesn't fight the seek
             with self.player.lock:
                 self.player.cursor = max(self.sel_start, min(samp, self.sel_end))
-            self._redraw_waveform()
+            self._show_click_flag(event.x, samp)
+            self._redraw()
         elif self.drag_mode in ("start", "end", "new") and self.pre_drag_selection is not None:
             if (self.sel_start, self.sel_end) != self.pre_drag_selection:
                 # push the PRE-drag selection so undo restores exactly where the drag began
@@ -1297,6 +1461,7 @@ class LoopCrossfadeGUI:
                 self.redo_stack.clear()
                 if self.preview_mode:
                     self._exit_preview_mode()
+            self._update_selection_duration_label()
         self.drag_mode = None
         self.pre_drag_selection = None
         if self.sel_end > self.sel_start:
@@ -1312,7 +1477,7 @@ class LoopCrossfadeGUI:
         w = self.canvas.winfo_width() or self.canvas_width
         center_x = w / 2 if center_x is None else center_x
         self._zoom_at(center_x, w, direction)
-        self._redraw_waveform()
+        self._redraw()
 
     def _zoom_at(self, x_pixel, w, direction):
         n = len(self.data)
@@ -1340,13 +1505,13 @@ class LoopCrossfadeGUI:
         direction = 1 if (getattr(event, "delta", 0) > 0 or getattr(event, "num", None) == 4) else -1
         w = self.canvas.winfo_width() or self.canvas_width
         self._zoom_at(event.x, w, direction)
-        self._redraw_waveform()
+        self._redraw()
 
     def zoom_to_fit(self):
         if self.data is None:
             return
         self.zoom_start, self.zoom_end = 0, len(self.data)
-        self._redraw_waveform()
+        self._redraw()
 
     def zoom_to_selection(self):
         if self.data is None or self.sel_end <= self.sel_start:
@@ -1355,7 +1520,7 @@ class LoopCrossfadeGUI:
         pad = max(1, int(span * 0.1))
         self.zoom_start = max(0, self.sel_start - pad)
         self.zoom_end = min(len(self.data), self.sel_end + pad)
-        self._redraw_waveform()
+        self._redraw()
 
     # ---------------- transport ----------------
 
@@ -1388,11 +1553,11 @@ class LoopCrossfadeGUI:
     def on_stop(self):
         self.player.stop()
         self.play_label_var.set("Play")
-        self._redraw_waveform()
+        self._redraw()
 
     def on_rewind(self):
         self.player.rewind()
-        self._redraw_waveform()
+        self._redraw()
 
     def on_loop_toggle(self):
         self.loop_var.set(not self.loop_var.get())
@@ -1478,13 +1643,16 @@ class LoopCrossfadeGUI:
         self.cropped = True
         self.preview_mode = False
         self.player.load(self.data, self.sr)
-        self._redraw_waveform()
+        self._redraw()
+        self._update_selection_duration_label()
         dur = len(self.data) / self.sr
         self.status_var.set(f"Cropped to {dur:.2f}s. (Cmd/Ctrl+Z to undo.)")
 
     def _poll_playhead(self):
         if self.data is not None and self.player.playing:
-            self._redraw_waveform()
+            self._redraw()
+            display_samp = self._display_cursor_sample()
+            self.time_var.set(format_time(display_samp / self.sr))
             if not self.player.playing:
                 self.play_label_var.set("Play")
         self.root.after(50, self._poll_playhead)
