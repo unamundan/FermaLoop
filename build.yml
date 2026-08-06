@@ -1,0 +1,79 @@
+name: Build Loop Crossfade Executables
+
+# Runs on GitHub's actual macOS and Windows machines and produces
+# self-contained double-clickable apps with ffmpeg bundled inside --
+# nothing for the end user to install. Trigger it either by pushing to
+# main, or manually from the "Actions" tab ("Run workflow" button) --
+# no terminal needed either way.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install numpy pyinstaller
+
+      - name: Download static ffmpeg (Windows build)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_extracted
+          $ffmpegExe = Get-ChildItem -Path ffmpeg_extracted -Filter ffmpeg.exe -Recurse | Select-Object -First 1
+          Copy-Item $ffmpegExe.FullName -Destination .\ffmpeg.exe
+
+      - name: Build self-contained executable
+        run: >
+          pyinstaller --onefile --windowed --name LoopCrossfade
+          --add-binary "ffmpeg.exe;."
+          loop_crossfade_app.py
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoopCrossfade-Windows
+          path: dist/LoopCrossfade.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install numpy pyinstaller
+
+      - name: Download static ffmpeg (macOS build)
+        run: |
+          curl -L -o ffmpeg.zip https://evermeet.cx/ffmpeg/getrelease/zip
+          unzip -o ffmpeg.zip -d ffmpeg_extracted
+          find ffmpeg_extracted -type f -name ffmpeg -exec cp {} ./ffmpeg \;
+          chmod +x ffmpeg
+
+      - name: Build self-contained .app
+        run: >
+          pyinstaller --onefile --windowed --name LoopCrossfade
+          --add-binary "ffmpeg:."
+          loop_crossfade_app.py
+
+      - name: Zip the .app bundle
+        run: cd dist && zip -r LoopCrossfade-Mac.zip LoopCrossfade.app
+
+      - name: Upload macOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoopCrossfade-Mac
+          path: dist/LoopCrossfade-Mac.zip
