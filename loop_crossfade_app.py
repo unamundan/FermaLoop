@@ -76,6 +76,7 @@ import re
 import sys
 import json
 import time
+import math
 import wave
 import struct
 import shutil
@@ -1012,6 +1013,76 @@ def render_checkbox_image(w, h, radius, checked, field_bg_hex, accent_hex, borde
     return img.resize((w, h), Image.LANCZOS)
 
 
+def render_icon_image(name, size, color_hex, supersample=6):
+    """Simple vector-style transport/tool icons (play, pause, stop, loop,
+    crop, undo, redo), drawn via PIL and supersampled for clean anti-
+    aliased edges at small sizes."""
+    sw = size * supersample
+    img = Image.new("RGBA", (sw, sw), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    color = _hex_to_rgb(color_hex) + (255,)
+    pad = sw * 0.18
+    cx, cy = sw / 2, sw / 2
+
+    if name == "play":
+        draw.polygon([(pad, pad * 0.5), (pad, sw - pad * 0.5), (sw - pad * 0.6, sw / 2)], fill=color)
+    elif name == "pause":
+        bw, gap = sw * 0.24, sw * 0.16
+        x0, x1 = sw / 2 - gap / 2 - bw, sw / 2 + gap / 2
+        draw.rectangle([x0, pad, x0 + bw, sw - pad], fill=color)
+        draw.rectangle([x1, pad, x1 + bw, sw - pad], fill=color)
+    elif name == "stop":
+        draw.rectangle([pad, pad, sw - pad, sw - pad], fill=color)
+    elif name == "loop":
+        r = sw * 0.30
+        bbox = [cx - r, cy - r, cx + r, cy + r]
+        width = max(3, int(sw * 0.14))
+        draw.arc(bbox, start=25, end=155, fill=color, width=width)
+        draw.arc(bbox, start=205, end=335, fill=color, width=width)
+
+        def arrowhead(angle_deg, s):
+            a = math.radians(angle_deg)
+            tipx, tipy = cx + r * math.cos(a), cy + r * math.sin(a)
+            a1, a2 = a + math.radians(135), a - math.radians(135)
+            p1 = (tipx + s * math.cos(a1), tipy + s * math.sin(a1))
+            p2 = (tipx + s * math.cos(a2), tipy + s * math.sin(a2))
+            draw.polygon([(tipx, tipy), p1, p2], fill=color)
+
+        arrowhead(155, sw * 0.17)
+        arrowhead(335, sw * 0.17)
+    elif name == "crop":
+        w, L = max(3, int(sw * 0.13)), sw * 0.34
+        draw.line([(pad, pad + L), (pad, pad), (pad + L, pad)], fill=color, width=w, joint="curve")
+        draw.line([(sw - pad, sw - pad - L), (sw - pad, sw - pad), (sw - pad - L, sw - pad)],
+                   fill=color, width=w, joint="curve")
+    elif name in ("undo", "redo"):
+        clockwise = (name == "redo")
+        r = sw * 0.27
+        width = max(3, int(sw * 0.15))
+        bbox = [cx - r, cy - r, cx + r, cy + r]
+        if not clockwise:
+            start_deg, end_deg = -90, 190
+            arrow_at_deg, pointing_deg = 190, 190 + 90
+        else:
+            start_deg, end_deg = -190, 90
+            arrow_at_deg, pointing_deg = -190, -190 - 90
+        draw.arc(bbox, start=start_deg, end=end_deg, fill=color, width=width)
+        tri_size = sw * 0.30
+        tri = Image.new("RGBA", (int(tri_size * 2), int(tri_size * 2)), (0, 0, 0, 0))
+        tdraw = ImageDraw.Draw(tri)
+        c = tri_size
+        tdraw.polygon([(c + tri_size * 0.55, c), (c - tri_size * 0.35, c - tri_size * 0.45),
+                       (c - tri_size * 0.35, c + tri_size * 0.45)], fill=color)
+        tri = tri.rotate(-pointing_deg, resample=Image.BICUBIC, center=(c, c))
+        ax = math.radians(arrow_at_deg)
+        tip_x, tip_y = cx + r * math.cos(ax), cy + r * math.sin(ax)
+        img.paste(tri, (int(tip_x - c), int(tip_y - c)), tri)
+    else:
+        raise ValueError(f"unknown icon name: {name}")
+
+    return img.resize((size, size), Image.LANCZOS)
+
+
 def _rounded_rect_points(w, h, r):
     r = min(r, w / 2, h / 2)
     return [r, 0, w - r, 0, w, 0, w, r, w, h - r, w, h,
@@ -1122,9 +1193,69 @@ class RoundedCheckbutton:
         self.frame.pack(**kw)
 
 
+class ToolTip:
+    """A small delayed hover tooltip for any Tk/ttk widget. Works for
+    text-only icon buttons (where there's no visible label to explain
+    what they do) as well as ordinary fields/buttons."""
+
+    def __init__(self, widget, text, delay=500):
+        import tkinter as tk
+        self.tk = tk
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.tip = None
+        self.after_id = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, event=None):
+        self._cancel()
+        self.after_id = self.widget.after(self.delay, self._show)
+
+    def _cancel(self):
+        if self.after_id is not None:
+            try:
+                self.widget.after_cancel(self.after_id)
+            except Exception:
+                pass
+            self.after_id = None
+
+    def _show(self):
+        if self.tip is not None or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 12
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        except Exception:
+            return
+        self.tip = self.tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        try:
+            self.tip.wm_attributes("-topmost", True)
+        except Exception:
+            pass
+        self.tip.wm_geometry(f"+{x}+{y}")
+        label = self.tk.Label(self.tip, text=self.text, bg="#111214", fg="#e6e6e8",
+                               font=("Segoe UI", 9), padx=8, pady=4,
+                               relief="solid", borderwidth=1)
+        label.pack()
+
+    def _hide(self, event=None):
+        self._cancel()
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except Exception:
+                pass
+            self.tip = None
+
+
 class LoopCrossfadeGUI:
     HANDLE_HIT_PX = 6
     CLICK_SLOP_PX = 3
+    ICON_SIZE = 26  # transport icons sized to roughly fill the button height
 
     def __init__(self):
         import tkinter as tk
@@ -1157,6 +1288,9 @@ class LoopCrossfadeGUI:
         self.redo_stack = []
         self.preview_mode = False  # True while the player holds a processed preview, not raw audio
         self._wave_photo = None    # keep a reference so PIL's PhotoImage isn't garbage collected
+        self._icon_cache = {}      # keeps icon PhotoImage references alive too
+        self._last_tooltip = None
+        self._play_tooltip = None
         self.player = AudioPlayer()
         self.shortcuts = load_shortcuts()
 
@@ -1169,7 +1303,6 @@ class LoopCrossfadeGUI:
         self.window_var = tk.StringVar(value="0.25")
         self.loop_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Drag an audio file onto this window, or click Browse.")
-        self.play_label_var = tk.StringVar(value="Play")
         self.time_var = tk.StringVar(value="00:00.000")
         self.selection_duration_var = tk.StringVar(value="Selection: --")
         self._click_flag = None       # (x_pixel, time_str) or None
@@ -1218,6 +1351,40 @@ class LoopCrossfadeGUI:
         style.configure("AuditionOn.TButton", background=AUDITION_ON, foreground="#ffffff",
                          borderwidth=0, padding=10, font=("Segoe UI", 11, "bold"))
         style.map("AuditionOn.TButton", background=[("active", AUDITION_ON_HOVER)])
+        style.configure("Icon.TButton", background=PANEL, foreground=FG, borderwidth=0, padding=9)
+        style.map("Icon.TButton", background=[("active", BORDER)])
+        style.configure("IconToggleOn.TButton", background=ACCENT, foreground="#ffffff", borderwidth=0, padding=9)
+        style.map("IconToggleOn.TButton", background=[("active", ACCENT_HOVER)])
+
+    # ---------------- icon buttons / tooltips ----------------
+
+    def _get_icon(self, name, size=None, color=FG):
+        size = size or self.ICON_SIZE
+        key = (name, size, color)
+        if key not in self._icon_cache:
+            if PIL_AVAILABLE:
+                img = render_icon_image(name, size, color)
+                self._icon_cache[key] = ImageTk.PhotoImage(img)
+            else:
+                self._icon_cache[key] = None
+        return self._icon_cache[key]
+
+    def _make_icon_button(self, parent, icon_name, tooltip_text, command, size=None, style="Icon.TButton"):
+        """Icon-only button with a hover tooltip -- falls back to a short
+        text label if Pillow isn't installed, so the button never ends up
+        blank."""
+        photo = self._get_icon(icon_name, size)
+        if photo is not None:
+            btn = self.ttk.Button(parent, image=photo, style=style, command=command)
+        else:
+            btn = self.ttk.Button(parent, text=tooltip_text, style=style, command=command)
+        self._last_tooltip = ToolTip(btn, tooltip_text)
+        return btn
+
+    def _set_play_pause_icon(self, playing):
+        self.btn_play.configure(image=self._get_icon("pause" if playing else "play"))
+        if self._play_tooltip is not None:
+            self._play_tooltip.text = "Pause" if playing else "Play"
 
     # ---------------- widget layout ----------------
 
@@ -1235,13 +1402,19 @@ class LoopCrossfadeGUI:
         ttk.Label(row, text="Input", width=7).pack(side="left")
         in_entry = RoundedEntry(row, self.in_path_var, BG, FIELD_BG, FG, BORDER)
         in_entry.pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(row, text="Browse", command=self.choose_input).pack(side="left")
+        ToolTip(in_entry.frame, "Path to the audio file to load")
+        btn_browse_in = ttk.Button(row, text="Browse", command=self.choose_input)
+        btn_browse_in.pack(side="left")
+        ToolTip(btn_browse_in, "Choose an audio file from disk")
 
         row = ttk.Frame(outer); row.pack(fill="x", pady=3)
         ttk.Label(row, text="Save as", width=7).pack(side="left")
         out_entry = RoundedEntry(row, self.out_path_var, BG, FIELD_BG, FG, BORDER)
         out_entry.pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(row, text="Browse", command=self.choose_output).pack(side="left")
+        ToolTip(out_entry.frame, "Where the processed loop will be saved")
+        btn_browse_out = ttk.Button(row, text="Browse", command=self.choose_output)
+        btn_browse_out.pack(side="left")
+        ToolTip(btn_browse_out, "Choose where to save the processed file")
 
         # timeline ruler (shared coordinate space with the waveform below)
         self.timeline_canvas = tk.Canvas(outer, height=22, bg=BG, highlightthickness=0)
@@ -1275,28 +1448,47 @@ class LoopCrossfadeGUI:
 
         # zoom row
         zoom_row = ttk.Frame(outer); zoom_row.pack(fill="x", pady=(0, 8))
-        ttk.Button(zoom_row, text="Zoom to Selection", command=self.zoom_to_selection).pack(side="left", padx=(0, 4))
-        ttk.Button(zoom_row, text="Zoom to Fit", command=self.zoom_to_fit).pack(side="left", padx=4)
-        ttk.Button(zoom_row, text="\u21b6 Undo", command=self.undo).pack(side="right", padx=4)
-        ttk.Button(zoom_row, text="\u21b7 Redo", command=self.redo).pack(side="right", padx=(4, 0))
+        btn_zoom_sel = ttk.Button(zoom_row, text="Zoom to Selection", command=self.zoom_to_selection)
+        btn_zoom_sel.pack(side="left", padx=(0, 4))
+        ToolTip(btn_zoom_sel, "Zoom the waveform view to fit the current selection")
+        btn_zoom_fit = ttk.Button(zoom_row, text="Zoom to Fit", command=self.zoom_to_fit)
+        btn_zoom_fit.pack(side="left", padx=4)
+        ToolTip(btn_zoom_fit, "Zoom the waveform view out to show the whole file")
+
+        self.btn_redo = self._make_icon_button(zoom_row, "redo", "Redo", self.redo, size=self.ICON_SIZE)
+        self.btn_redo.pack(side="right", padx=4)
+        self.btn_undo = self._make_icon_button(zoom_row, "undo", "Undo", self.undo, size=self.ICON_SIZE)
+        self.btn_undo.pack(side="right", padx=(4, 0))
 
         # transport
         transport = ttk.Frame(outer); transport.pack(fill="x", pady=(4, 4))
-        self.btn_rewind = ttk.Button(transport, text="\u23ee Rewind", command=self.on_rewind)
-        self.btn_rewind.pack(side="left", padx=(0, 4))
-        self.btn_play = ttk.Button(transport, textvariable=self.play_label_var, command=self.on_play_pause)
-        self.btn_play.pack(side="left", padx=4)
-        self.btn_stop = ttk.Button(transport, text="\u23f9 Stop", command=self.on_stop)
+
+        self.btn_play = self._make_icon_button(transport, "play", "Play", self.on_play_pause, size=self.ICON_SIZE)
+        self.btn_play.pack(side="left", padx=(0, 4))
+        self._play_tooltip = self._last_tooltip
+
+        self.btn_stop = self._make_icon_button(transport, "stop", "Stop", self.on_stop, size=self.ICON_SIZE)
         self.btn_stop.pack(side="left", padx=4)
-        self.btn_loop = ttk.Button(transport, text="\U0001f501 Loop", command=self.on_loop_toggle)
+
+        self.btn_loop = self._make_icon_button(transport, "loop", "Toggle Loop", self.on_loop_toggle, size=self.ICON_SIZE)
         self.btn_loop.pack(side="left", padx=4)
+
         self.audition_label_var = tk.StringVar(value="\u25b6 Audition Loop")
         self.btn_audition = ttk.Button(transport, textvariable=self.audition_label_var,
                                         style="Accent.TButton", command=self.on_audition)
         self.btn_audition.pack(side="left", padx=(16, 4))
-        ttk.Button(transport, text="Crop to Selection", command=self.on_crop).pack(side="left", padx=4)
-        ttk.Button(transport, text="Stretch...", command=self.open_stretch_dialog).pack(side="left", padx=4)
-        ttk.Button(transport, text="Keyboard Shortcuts...", command=self.open_shortcuts_dialog).pack(side="right")
+        ToolTip(self.btn_audition, "Preview the current selection's crossfade, looped, without saving")
+
+        self.btn_crop = self._make_icon_button(transport, "crop", "Crop to Selection", self.on_crop, size=self.ICON_SIZE)
+        self.btn_crop.pack(side="left", padx=4)
+
+        btn_stretch = ttk.Button(transport, text="Stretch...", command=self.open_stretch_dialog)
+        btn_stretch.pack(side="left", padx=4)
+        ToolTip(btn_stretch, "PaulXStretch: extreme time-stretch the current selection")
+
+        btn_shortcuts = ttk.Button(transport, text="Keyboard Shortcuts...", command=self.open_shortcuts_dialog)
+        btn_shortcuts.pack(side="right")
+        ToolTip(btn_shortcuts, "View or remap keyboard shortcuts")
 
         ttk.Label(outer, text="Audition previews the current selection's crossfade without saving or cropping. "
                                "Crop is only needed once you want to commit the working range.",
@@ -1306,35 +1498,48 @@ class LoopCrossfadeGUI:
 
         # processing options (rounded checkboxes)
         row = ttk.Frame(outer); row.pack(fill="x", pady=4)
-        RoundedCheckbutton(row, "Snap loop points to transients (beat / articulation alignment)",
+        snap_cb = RoundedCheckbutton(row, "Snap loop points to transients (beat / articulation alignment)",
                             self.snap_var, BG, FG, FIELD_BG, ACCENT, BORDER,
-                            command=self._toggle_window_entry).pack(side="left")
+                            command=self._toggle_window_entry)
+        snap_cb.pack(side="left")
+        ToolTip(snap_cb.frame, "Trim the selection to the strongest nearby attack at each end,\n"
+                                "so the loop starts/ends on the beat instead of an arbitrary sample")
         row = ttk.Frame(outer); row.pack(fill="x", pady=(0, 10))
         ttk.Label(row, text="Search window(s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
         self.window_entry = RoundedEntry(row, self.window_var, BG, FIELD_BG, FG, BORDER,
                                           height=28, radius=8, width=70)
         self.window_entry.pack(side="left")
         self.window_entry.configure(state="disabled")
+        ToolTip(self.window_entry.frame, "How far from each end to search for a transient (seconds)")
 
         row = ttk.Frame(outer); row.pack(fill="x", pady=4)
-        RoundedCheckbutton(row, "Auto-detect crossfade length", self.auto_xfade_var,
+        auto_cb = RoundedCheckbutton(row, "Auto-detect crossfade length", self.auto_xfade_var,
                             BG, FG, FIELD_BG, ACCENT, BORDER,
-                            command=self._toggle_xfade_entry).pack(side="left")
+                            command=self._toggle_xfade_entry)
+        auto_cb.pack(side="left")
+        ToolTip(auto_cb.frame, "Automatically pick the crossfade length that best matches\n"
+                                "the head and tail of the selection, instead of a fixed value")
         row = ttk.Frame(outer); row.pack(fill="x", pady=(0, 4))
         ttk.Label(row, text="Manual crossfade(s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
         self.xfade_entry = RoundedEntry(row, self.xfade_var, BG, FIELD_BG, FG, BORDER,
                                          height=28, radius=8, width=70)
         self.xfade_entry.pack(side="left")
+        ToolTip(self.xfade_entry.frame, "Crossfade duration in seconds (used when auto-detect is off)")
 
         row = ttk.Frame(outer); row.pack(fill="x", pady=(8, 4))
         ttk.Label(row, text="Curve:", style="Muted.TLabel").pack(side="left", padx=(24, 6))
-        ttk.Combobox(row, textvariable=self.curve_var, values=["Equal power", "Linear"],
-                     state="readonly", width=14).pack(side="left")
+        curve_combo = ttk.Combobox(row, textvariable=self.curve_var, values=["Equal power", "Linear"],
+                     state="readonly", width=14)
+        curve_combo.pack(side="left")
+        ToolTip(curve_combo, "Equal power: smoother, constant perceived loudness through the fade.\n"
+                              "Linear: simpler ramp, can dip slightly in the middle.")
 
         ttk.Frame(outer, height=1, style="Panel.TFrame").pack(fill="x", pady=14)
 
-        ttk.Button(outer, text="Process & Save", style="Accent.TButton",
-                   command=self.run_process).pack(fill="x", pady=(0, 10))
+        btn_process = ttk.Button(outer, text="Process & Save", style="Accent.TButton",
+                   command=self.run_process)
+        btn_process.pack(fill="x", pady=(0, 10))
+        ToolTip(btn_process, "Crossfade the current selection and save it to the 'Save as' path")
 
         ttk.Label(outer, textvariable=self.status_var, style="Muted.TLabel",
                   wraplength=700, justify="left").pack(anchor="w", fill="x")
@@ -1816,16 +2021,16 @@ class LoopCrossfadeGUI:
         self._exit_preview_mode()  # plain Play always plays raw source audio
         if self.player.playing:
             self.player.pause()
-            self.play_label_var.set("Play")
+            self._set_play_pause_icon(False)
         else:
             self.player.set_selection(self.sel_start, self.sel_end)
             self.player.set_loop(self.loop_var.get())
             self.player.play()
-            self.play_label_var.set("Pause")
+            self._set_play_pause_icon(True)
 
     def on_stop(self):
         self.player.stop()
-        self.play_label_var.set("Play")
+        self._set_play_pause_icon(False)
         self._redraw()
 
     def on_rewind(self):
@@ -1835,7 +2040,7 @@ class LoopCrossfadeGUI:
     def on_loop_toggle(self):
         self.loop_var.set(not self.loop_var.get())
         self.player.set_loop(self.loop_var.get())
-        self.btn_loop.configure(style="ToggleOn.TButton" if self.loop_var.get() else "Toggle.TButton")
+        self.btn_loop.configure(style="IconToggleOn.TButton" if self.loop_var.get() else "Icon.TButton")
 
     def _read_process_params(self, silent=False):
         """Validates and returns (xfade_seconds_or_None, curve, snap, window)
@@ -1888,7 +2093,7 @@ class LoopCrossfadeGUI:
         if self.preview_mode and not silent:
             self._exit_preview_mode()
             self.player.stop()
-            self.play_label_var.set("Play")
+            self._set_play_pause_icon(False)
             self.status_var.set("Stopped auditioning.")
             self._redraw()
             return
@@ -1921,9 +2126,9 @@ class LoopCrossfadeGUI:
             self._update_audition_button_style()
             self.loop_var.set(True)
             self.player.set_loop(True)
-            self.btn_loop.configure(style="ToggleOn.TButton")
+            self.btn_loop.configure(style="IconToggleOn.TButton")
             self.player.play()
-            self.play_label_var.set("Pause")
+            self._set_play_pause_icon(True)
 
             dur = preview.shape[0] / self.sr
             self.status_var.set(
@@ -1969,7 +2174,7 @@ class LoopCrossfadeGUI:
         # this) ending up in a stale state once the dialog closes
         self._exit_preview_mode()
         self.player.stop()
-        self.play_label_var.set("Play")
+        self._set_play_pause_icon(False)
         self._redraw()
 
         tk, ttk = self.tk, self.ttk
@@ -2007,10 +2212,13 @@ class LoopCrossfadeGUI:
 
         row = ttk.Frame(dlg); row.pack(fill="x", padx=14, pady=4)
         ttk.Label(row, text="Window size (s):", background=BG, foreground=FG).pack(side="left")
-        window_var = tk.StringVar(value="0.1")
+        window_var = tk.StringVar(value="0.25")
         RoundedEntry(row, window_var, BG, FIELD_BG, FG, BORDER, height=28, radius=8, width=80).pack(side="right")
-        ttk.Label(dlg, text="Smaller = smoother/less pulsing, larger = more sustained texture.",
-                  background=BG, foreground=MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(0, 4))
+        ttk.Label(dlg, text="Smaller reduces amplitude pulsing but can sound grainier/less full; "
+                             "larger sounds fuller but may pulse more. Try both -- it's genuinely a "
+                             "per-track tradeoff, not a single right answer.",
+                  background=BG, foreground=MUTED, font=("Segoe UI", 8),
+                  wraplength=350, justify="left").pack(anchor="w", padx=14, pady=(0, 4))
 
         result_label = ttk.Label(dlg, text="", background=BG, foreground=MUTED,
                                   wraplength=350, justify="left")
@@ -2050,7 +2258,7 @@ class LoopCrossfadeGUI:
                 self.zoom_start, self.zoom_end = 0, len(self.data)
                 self.preview_mode = False
                 self._update_audition_button_style()
-                self.play_label_var.set("Play")
+                self._set_play_pause_icon(False)
                 self.time_var.set("00:00.000")
                 self.player.load(self.data, self.sr)
                 self._redraw()
@@ -2084,7 +2292,7 @@ class LoopCrossfadeGUI:
             display_samp = self._display_cursor_sample()
             self.time_var.set(format_time(display_samp / self.sr))
             if not self.player.playing:
-                self.play_label_var.set("Play")
+                self._set_play_pause_icon(False)
         self.root.after(50, self._poll_playhead)
 
     # ---------------- keyboard shortcuts ----------------
