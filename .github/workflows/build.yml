@@ -27,9 +27,30 @@ jobs:
       - name: Download static ffmpeg (Windows build)
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          # Invoke-WebRequest's default progress-bar rendering is a well-known
+          # cause of slow/failed downloads on GitHub's Windows runners for
+          # larger files -- disabling it (and forcing TLS 1.2) fixes most of
+          # these failures. Falls back to curl.exe (bundled on windows-latest)
+          # if Invoke-WebRequest still fails for any reason.
+          $ProgressPreference = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          try {
+            Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip -UseBasicParsing
+          } catch {
+            Write-Host "Invoke-WebRequest failed ($_), retrying with curl.exe..."
+            curl.exe -L -o ffmpeg.zip $url
+          }
+          if (-not (Test-Path ffmpeg.zip) -or (Get-Item ffmpeg.zip).Length -lt 1MB) {
+            Write-Error "ffmpeg.zip download failed or is suspiciously small -- check that the URL is still valid: $url"
+            exit 1
+          }
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_extracted
           $ffmpegExe = Get-ChildItem -Path ffmpeg_extracted -Filter ffmpeg.exe -Recurse | Select-Object -First 1
+          if (-not $ffmpegExe) {
+            Write-Error "ffmpeg.exe not found inside the downloaded archive -- its internal folder structure may have changed."
+            exit 1
+          }
           Copy-Item $ffmpegExe.FullName -Destination .\ffmpeg.exe
 
       - name: Build self-contained executable
