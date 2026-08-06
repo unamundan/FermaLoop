@@ -465,7 +465,9 @@ def auto_select_xfade(data, sr, curve="equal_power",
 
 def _paulstretch_mono(data, samplerate, stretch_factor, window_seconds, rng=None):
     """Core single-channel PaulStretch algorithm (Nasca Octavian Paul's
-    'Paul's Extreme Sound Stretch', as extended by PaulXStretch).
+    'Paul's Extreme Sound Stretch', the technique PaulXStretch is built on
+    -- see the module docstring note below on feature-completeness vs. the
+    actual PaulXStretch application).
 
     Unlike a phase vocoder or granular stretcher -- which try to preserve
     phase relationships between analysis frames and pay for it with
@@ -477,6 +479,14 @@ def _paulstretch_mono(data, samplerate, stretch_factor, window_seconds, rng=None
     stretch factors of 10x-100x+ where other methods fall apart. It's
     suited to ambient/drone/texture material, not rhythmic content --
     that smearing is inherent to the technique, not a bug.
+
+    The frame is windowed on BOTH analysis and synthesis (a "squared"
+    Hann), which -- unlike a single Hann window -- requires 75% overlap
+    between frames (not 50%) to reconstruct at a constant level; using
+    50% here previously produced a ~67% amplitude ripple cycling at the
+    frame-hop rate, audible as pulsing/uneven loudness. Verified this
+    numerically: periodic Hann (denominator N, not N-1) squared at 75%
+    overlap sums to a constant to within floating-point precision.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -487,16 +497,19 @@ def _paulstretch_mono(data, samplerate, stretch_factor, window_seconds, rng=None
 
     windowsize = int(window_seconds * samplerate)
     windowsize = max(16, windowsize)
-    windowsize += windowsize % 2  # force even
-    half_windowsize = windowsize // 2
+    windowsize += windowsize % 4  # keep divisible by 4 so the output hop below is a whole number
 
-    window = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(windowsize) / (windowsize - 1))
+    # periodic Hann (denominator = windowsize, not windowsize-1) -- the
+    # form that actually satisfies constant-overlap-add for STFT use
+    window = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(windowsize) / windowsize)
+    output_hop = windowsize // 4  # 75% overlap, required for a squared Hann window
+
     padded = np.concatenate([data, np.zeros(windowsize)])
 
     start_pos = 0.0
-    displace_pos = (windowsize * 0.5) / stretch_factor
+    displace_pos = output_hop / stretch_factor
 
-    out_len_guess = int(n / max(displace_pos, 1e-9) * half_windowsize) + windowsize * 4
+    out_len_guess = int(n / max(displace_pos, 1e-9) * output_hop) + windowsize * 4
     output = np.zeros(out_len_guess)
     out_pos = 0
 
@@ -516,7 +529,7 @@ def _paulstretch_mono(data, samplerate, stretch_factor, window_seconds, rng=None
             output = np.concatenate([output, np.zeros(len(output) + windowsize)])
         output[out_pos:out_pos + windowsize] += new_buf
 
-        out_pos += half_windowsize
+        out_pos += output_hop
         start_pos += displace_pos
         if start_pos >= n:
             break
@@ -647,6 +660,42 @@ def save_shortcuts(shortcuts, path=SHORTCUTS_PATH):
             json.dump(shortcuts, f, indent=2)
     except OSError:
         pass  # non-fatal -- shortcuts just won't persist this session
+
+
+# ---------------------------------------------------------------------------
+# Window size persistence (per named window, e.g. "main", "stretch")
+# ---------------------------------------------------------------------------
+
+WINDOW_SIZES_PATH = os.path.join(os.path.expanduser("~"), ".loop_crossfade_window_sizes.json")
+
+
+def load_window_sizes(path=WINDOW_SIZES_PATH):
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_window_sizes(sizes, path=WINDOW_SIZES_PATH):
+    try:
+        with open(path, "w") as f:
+            json.dump(sizes, f, indent=2)
+    except OSError:
+        pass
+
+
+def resolve_window_size(required_w, required_h, saved):
+    """Never launches smaller than what's needed to show all content, but
+    respects a larger size if the person deliberately resized bigger last
+    time."""
+    if not saved:
+        return required_w, required_h
+    w = max(required_w, saved.get("width", required_w))
+    h = max(required_h, saved.get("height", required_h))
+    return w, h
 
 
 # ---------------------------------------------------------------------------
@@ -1084,9 +1133,8 @@ class LoopCrossfadeGUI:
 
         self.root = TkinterDnD.Tk() if DND_AVAILABLE else tk.Tk()
         self.root.title("Loop Crossfade")
-        self.root.geometry("760x620")
-        self.root.minsize(700, 600)
         self.root.configure(bg=BG)
+        self.window_sizes = load_window_sizes()
 
         self._build_style()
 
@@ -1136,6 +1184,9 @@ class LoopCrossfadeGUI:
         self._bind_shortcuts()
         if DND_AVAILABLE:
             self._enable_drag_and_drop()
+
+        self._apply_saved_or_natural_size()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._poll_playhead()
 
@@ -1925,9 +1976,21 @@ class LoopCrossfadeGUI:
         dlg = tk.Toplevel(self.root)
         dlg.title("PaulXStretch")
         dlg.configure(bg=BG)
-        dlg.geometry("380x220")
         dlg.transient(self.root)
         dlg.grab_set()  # modal: prevents interacting with transport controls while this is open
+
+        def close_dialog():
+            try:
+                self.window_sizes["stretch"] = {
+                    "width": dlg.winfo_width(),
+                    "height": dlg.winfo_height(),
+                }
+                save_window_sizes(self.window_sizes)
+            except Exception:
+                pass
+            dlg.destroy()
+
+        dlg.protocol("WM_DELETE_WINDOW", close_dialog)
 
         sel_dur = (self.sel_end - self.sel_start) / self.sr
         ttk.Label(dlg, text=f"Stretching {format_time(sel_dur)} of selected audio.",
@@ -1944,8 +2007,10 @@ class LoopCrossfadeGUI:
 
         row = ttk.Frame(dlg); row.pack(fill="x", padx=14, pady=4)
         ttk.Label(row, text="Window size (s):", background=BG, foreground=FG).pack(side="left")
-        window_var = tk.StringVar(value="0.25")
+        window_var = tk.StringVar(value="0.1")
         RoundedEntry(row, window_var, BG, FIELD_BG, FG, BORDER, height=28, radius=8, width=80).pack(side="right")
+        ttk.Label(dlg, text="Smaller = smoother/less pulsing, larger = more sustained texture.",
+                  background=BG, foreground=MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(0, 4))
 
         result_label = ttk.Label(dlg, text="", background=BG, foreground=MUTED,
                                   wraplength=350, justify="left")
@@ -1997,13 +2062,21 @@ class LoopCrossfadeGUI:
                     f"Stretched {sel_dur:.2f}s to {out_dur:.2f}s ({factor:.1f}x) in {elapsed:.1f}s. "
                     f"(Cmd/Ctrl+Z to undo.) Audition or Crop to build the loop."
                 )
-                dlg.destroy()
+                close_dialog()
             except Exception as ex:
                 result_label.configure(text=f"Failed: {ex}")
 
         btn_row = ttk.Frame(dlg); btn_row.pack(fill="x", padx=14, pady=14)
-        ttk.Button(btn_row, text="Cancel", command=dlg.destroy).pack(side="right", padx=(6, 0))
+        ttk.Button(btn_row, text="Cancel", command=close_dialog).pack(side="right", padx=(6, 0))
         ttk.Button(btn_row, text="Stretch", style="Accent.TButton", command=apply_stretch).pack(side="right")
+
+        # size to fit all content on first paint, respecting a larger saved size
+        dlg.update_idletasks()
+        required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        saved = self.window_sizes.get("stretch")
+        w, h = resolve_window_size(required_w, required_h, saved)
+        dlg.geometry(f"{w}x{h}")
+        dlg.minsize(required_w, required_h)
 
     def _poll_playhead(self):
         if self.data is not None and self.player.playing:
@@ -2072,7 +2145,6 @@ class LoopCrossfadeGUI:
         dlg = tk.Toplevel(self.root)
         dlg.title("Keyboard Shortcuts")
         dlg.configure(bg=BG)
-        dlg.geometry("380x460")
         dlg.transient(self.root)
 
         rows = {}
@@ -2101,11 +2173,26 @@ class LoopCrossfadeGUI:
 
         def on_close():
             save_shortcuts(self.shortcuts)
+            try:
+                self.window_sizes["shortcuts"] = {
+                    "width": dlg.winfo_width(),
+                    "height": dlg.winfo_height(),
+                }
+                save_window_sizes(self.window_sizes)
+            except Exception:
+                pass
             dlg.destroy()
 
         ttk.Button(dlg, text="Done", command=on_close, style="Accent.TButton").grid(
             row=len(rows), column=0, columnspan=2, pady=16, padx=10, sticky="ew")
         dlg.protocol("WM_DELETE_WINDOW", on_close)
+
+        dlg.update_idletasks()
+        required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        saved = self.window_sizes.get("shortcuts")
+        w, h = resolve_window_size(required_w, required_h, saved)
+        dlg.geometry(f"{w}x{h}")
+        dlg.minsize(required_w, required_h)
 
     # ---------------- process & save ----------------
 
@@ -2149,6 +2236,31 @@ class LoopCrossfadeGUI:
         except Exception as e:
             self.status_var.set("Failed. See error dialog.")
             self.messagebox.showerror("Loop Crossfade", str(e))
+
+    # ---------------- window sizing ----------------
+
+    def _apply_saved_or_natural_size(self):
+        """Sizes the window to fit everything on first paint (no manual
+        resize needed), while respecting a larger size the user may have
+        deliberately set last time the app was open."""
+        self.root.update_idletasks()
+        required_w = self.root.winfo_reqwidth()
+        required_h = self.root.winfo_reqheight()
+        saved = self.window_sizes.get("main")
+        w, h = resolve_window_size(required_w, required_h, saved)
+        self.root.geometry(f"{w}x{h}")
+        self.root.minsize(required_w, required_h)
+
+    def _on_close(self):
+        try:
+            self.window_sizes["main"] = {
+                "width": self.root.winfo_width(),
+                "height": self.root.winfo_height(),
+            }
+            save_window_sizes(self.window_sizes)
+        except Exception:
+            pass
+        self.root.destroy()
 
     def run(self):
         self.root.mainloop()
