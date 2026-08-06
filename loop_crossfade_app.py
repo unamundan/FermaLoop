@@ -1637,9 +1637,9 @@ class LoopCrossfadeGUI:
         self._draw_placeholder()
 
         # timer + selection duration readouts
-        info_row = ttk.Frame(outer); info_row.pack(fill="x", pady=(2, 4))
+        info_row = ttk.Frame(outer); info_row.pack(fill="x", pady=(4, 6))
         ttk.Label(info_row, textvariable=self.time_var, style="Muted.TLabel",
-                  font=("Segoe UI", 10, "bold")).pack(side="left")
+                  font=("Segoe UI", 22, "bold")).pack(side="left")
         ttk.Label(info_row, textvariable=self.selection_duration_var, style="Muted.TLabel").pack(side="right")
 
         ttk.Label(outer, text="Drag to select, drag edges to adjust, click to move the playhead. "
@@ -2095,13 +2095,18 @@ class LoopCrossfadeGUI:
                 })
                 self.redo_stack.clear()
                 if self.preview_mode:
-                    # was auditioning: keep looping, just re-process for the
-                    # new selection, instead of dropping back to raw audio
-                    self.player.set_selection(self.sel_start, self.sel_end)
+                    # was auditioning: re-process the NEW selection and keep
+                    # looping. on_loop_preview reads self.sel_start/sel_end
+                    # directly and calls player.load()/play() itself -- do
+                    # NOT also call player.set_selection() here, since by
+                    # this point player.data is the short PREVIEW buffer,
+                    # not self.data, and these raw (large) indices would
+                    # get clamped against it and corrupt the player's
+                    # bounds right after the correct reprocessing.
                     self.on_loop_preview(silent=True)
+                elif self.sel_end > self.sel_start:
+                    self.player.set_selection(self.sel_start, self.sel_end)
             self._update_selection_duration_label()
-            if self.sel_end > self.sel_start:
-                self.player.set_selection(self.sel_start, self.sel_end)
         self.drag_mode = None
         self.pre_drag_selection = None
 
@@ -2407,15 +2412,19 @@ class LoopCrossfadeGUI:
                   background=BG, foreground=MUTED, wraplength=350, justify="left",
                   font=("Segoe UI", 9)).pack(anchor="w", padx=14, pady=(0, 10))
 
-        row = ttk.Frame(dlg); row.pack(fill="x", padx=14, pady=4)
-        ttk.Label(row, text="Stretch factor (x):", background=BG, foreground=FG).pack(side="left")
+        row = ttk.Frame(dlg); row.pack(fill="x", padx=14, pady=(4, 0))
+        ttk.Label(row, text="Stretch factor:", background=BG, foreground=FG).pack(side="left")
         factor_var = tk.StringVar(value="8.0")
         RoundedEntry(row, factor_var, BG, FIELD_BG, FG, BORDER, height=28, radius=8, width=80).pack(side="right")
+        ttk.Label(dlg, text="Typical range: 2-50 (higher takes longer and produces much longer output)",
+                  background=BG, foreground=MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(2, 8))
 
-        row = ttk.Frame(dlg); row.pack(fill="x", padx=14, pady=4)
-        ttk.Label(row, text="Window size (s):", background=BG, foreground=FG).pack(side="left")
+        row = ttk.Frame(dlg); row.pack(fill="x", padx=14, pady=(4, 0))
+        ttk.Label(row, text="Window size:", background=BG, foreground=FG).pack(side="left")
         window_var = tk.StringVar(value="0.25")
         RoundedEntry(row, window_var, BG, FIELD_BG, FG, BORDER, height=28, radius=8, width=80).pack(side="right")
+        ttk.Label(dlg, text="Typical range: 0.05-2.0 seconds (0.1-0.25 is a good starting point)",
+                  background=BG, foreground=MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(2, 0))
         ttk.Label(dlg, text="Smaller reduces amplitude pulsing but can sound grainier/less full; "
                              "larger sounds fuller but may pulse more. Try both -- it's genuinely a "
                              "per-track tradeoff, not a single right answer.",
