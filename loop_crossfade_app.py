@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Loop Crossfade
-==============
+FermaLoop
+=========
 A standalone tool that replicates TwistedWave's "Loop Crossfade" effect:
 it blends the tail of an audio file into its head so the file loops back
 on itself with no click or pop at the seam -- plus:
@@ -617,7 +617,7 @@ DEFAULT_SHORTCUTS = {
     "crop": "c",
     "audition": "a",
     "undo": "Control-z",
-    "redo": "Control-y",
+    "redo": "Shift-Control-z",
     "zoom_in": "equal",
     "zoom_out": "minus",
     "zoom_fit": "0",
@@ -628,9 +628,9 @@ SHORTCUT_LABELS = {
     "play_pause": "Play / Pause",
     "stop": "Stop",
     "rewind": "Rewind",
-    "loop_toggle": "Toggle Loop",
+    "loop_toggle": "Repeat (loop raw selection)",
     "crop": "Crop to Selection",
-    "audition": "Audition Loop",
+    "audition": "Loop (crossfade preview)",
     "undo": "Undo",
     "redo": "Redo",
     "zoom_in": "Zoom In",
@@ -1013,10 +1013,11 @@ def render_checkbox_image(w, h, radius, checked, field_bg_hex, accent_hex, borde
     return img.resize((w, h), Image.LANCZOS)
 
 
-def render_icon_image(name, size, color_hex, supersample=6):
+def render_icon_image(name, size, color_hex, supersample=6, rotation_deg=0):
     """Simple vector-style transport/tool icons (play, pause, stop, loop,
-    crop, undo, redo), drawn via PIL and supersampled for clean anti-
-    aliased edges at small sizes."""
+    repeat, stretch, crop), drawn via PIL and supersampled for clean anti-
+    aliased edges at small sizes. `rotation_deg` only affects "loop" (used
+    to animate it while a crossfade preview is actively playing)."""
     sw = size * supersample
     img = Image.new("RGBA", (sw, sw), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -1034,11 +1035,15 @@ def render_icon_image(name, size, color_hex, supersample=6):
     elif name == "stop":
         draw.rectangle([pad, pad, sw - pad, sw - pad], fill=color)
     elif name == "loop":
-        r = sw * 0.30
+        # sized/weighted to match the visual density of the filled icons
+        # (play/stop/crop) -- the original thinner, smaller circle read as
+        # noticeably lighter/smaller next to them. rotation_deg animates it
+        # while actively playing the processed/crossfaded preview.
+        r = sw * 0.42
         bbox = [cx - r, cy - r, cx + r, cy + r]
-        width = max(3, int(sw * 0.14))
-        draw.arc(bbox, start=25, end=155, fill=color, width=width)
-        draw.arc(bbox, start=205, end=335, fill=color, width=width)
+        width = max(3, int(sw * 0.19))
+        draw.arc(bbox, start=25 + rotation_deg, end=155 + rotation_deg, fill=color, width=width)
+        draw.arc(bbox, start=205 + rotation_deg, end=335 + rotation_deg, fill=color, width=width)
 
         def arrowhead(angle_deg, s):
             a = math.radians(angle_deg)
@@ -1048,8 +1053,39 @@ def render_icon_image(name, size, color_hex, supersample=6):
             p2 = (tipx + s * math.cos(a2), tipy + s * math.sin(a2))
             draw.polygon([(tipx, tipy), p1, p2], fill=color)
 
-        arrowhead(155, sw * 0.17)
-        arrowhead(335, sw * 0.17)
+        arrowhead(155 + rotation_deg, sw * 0.22)
+        arrowhead(335 + rotation_deg, sw * 0.22)
+    elif name == "repeat":
+        # musical repeat barlines: ||: :||  -- loops the RAW selection with
+        # no crossfade processing (you'll hear a click at the seam)
+        top, bot = sw * 0.14, sw * 0.86
+        thick_w = max(2, int(sw * 0.095))
+        thin_w = max(2, int(sw * 0.055))
+        dot_r = sw * 0.048
+        half_gap = sw * 0.11
+        for sign in (-1, 1):
+            x = cx + sign * half_gap
+            draw.ellipse([x - dot_r, sw * 0.34 - dot_r, x + dot_r, sw * 0.34 + dot_r], fill=color)
+            draw.ellipse([x - dot_r, sw * 0.66 - dot_r, x + dot_r, sw * 0.66 + dot_r], fill=color)
+            x += sign * dot_r * 2.6
+            draw.line([(x, top), (x, bot)], fill=color, width=thin_w)
+            x += sign * thin_w * 2.8
+            draw.line([(x, top), (x, bot)], fill=color, width=thick_w)
+    elif name == "stretch":
+        # calipers being pulled apart by a double-headed arrow
+        pad2, top, bot, L = sw * 0.08, sw * 0.18, sw * 0.82, sw * 0.16
+        w = max(3, int(sw * 0.10))
+        draw.line([(pad2 + L, top), (pad2, top), (pad2, bot), (pad2 + L, bot)],
+                  fill=color, width=w, joint="curve")
+        draw.line([(sw - pad2 - L, top), (sw - pad2, top), (sw - pad2, bot), (sw - pad2 - L, bot)],
+                  fill=color, width=w, joint="curve")
+        shaft_w = max(3, int(sw * 0.10))
+        s = sw * 0.17
+        x_left, x_right = pad2 + L + sw * 0.02, sw - pad2 - L - sw * 0.02
+        base_left, base_right = x_left + s, x_right - s
+        draw.line([(base_left, cy), (base_right, cy)], fill=color, width=shaft_w)
+        draw.polygon([(x_left, cy), (base_left, cy - s * 0.68), (base_left, cy + s * 0.68)], fill=color)
+        draw.polygon([(x_right, cy), (base_right, cy - s * 0.68), (base_right, cy + s * 0.68)], fill=color)
     elif name == "crop":
         w, L = max(3, int(sw * 0.13)), sw * 0.34
         draw.line([(pad, pad + L), (pad, pad), (pad + L, pad)], fill=color, width=w, joint="curve")
@@ -1193,6 +1229,86 @@ class RoundedCheckbutton:
         self.frame.pack(**kw)
 
 
+class RoundedDropdown:
+    """A ttk.Combobox substitute styled to match the app's dark theme.
+    ttk.Combobox's popped-down list is a native platform listbox that
+    ttk.Style can't fully restyle on most platforms -- hence the white
+    background/hard edges. This draws its own small popup instead."""
+
+    def __init__(self, parent, textvariable, values, bg, field_bg, fg, border, accent,
+                 height=32, radius=10, width=140):
+        import tkinter as tk
+        self.tk = tk
+        self.variable = textvariable
+        self.values = values
+        self.bg, self.field_bg, self.fg, self.border, self.accent = bg, field_bg, fg, border, accent
+        self.radius = radius
+        self.fixed_width = width
+        self.height = height
+        self.popup = None
+
+        self.frame = tk.Frame(parent, bg=bg)
+        self.canvas = tk.Canvas(self.frame, width=width, height=height, bg=bg, highlightthickness=0)
+        self.canvas.pack()
+        self._bg_photo = None
+        self.canvas.bind("<Button-1>", self._toggle_popup)
+        self.variable.trace_add("write", lambda *a: self._redraw())
+        self._redraw()
+
+    def _redraw(self):
+        w, h = self.fixed_width, self.height
+        self.canvas.delete("all")
+        if PIL_AVAILABLE:
+            img = render_rounded_box_image(w, h, self.radius, self.field_bg, self.border)
+            self._bg_photo = ImageTk.PhotoImage(img)
+            self.canvas.create_image(0, 0, anchor="nw", image=self._bg_photo)
+        else:
+            pts = _rounded_rect_points(w, h, self.radius)
+            self.canvas.create_polygon(pts, smooth=True, fill=self.field_bg, outline=self.border)
+        self.canvas.create_text(12, h / 2, anchor="w", text=self.variable.get(),
+                                 fill=self.fg, font=("Segoe UI", 10))
+        cx, cy = w - 16, h / 2
+        self.canvas.create_polygon(cx - 5, cy - 3, cx + 5, cy - 3, cx, cy + 4, fill=self.fg)
+
+    def _toggle_popup(self, event=None):
+        if self.popup is not None:
+            self._close_popup()
+            return
+        tk = self.tk
+        x = self.canvas.winfo_rootx()
+        y = self.canvas.winfo_rooty() + self.canvas.winfo_height()
+        self.popup = tk.Toplevel(self.canvas)
+        self.popup.wm_overrideredirect(True)
+        row_h = 30
+        self.popup.wm_geometry(f"{self.fixed_width}x{len(self.values) * row_h}+{x}+{y}")
+        frame = tk.Frame(self.popup, bg=self.field_bg, highlightthickness=1, highlightbackground=self.border)
+        frame.pack(fill="both", expand=True)
+        for val in self.values:
+            row = tk.Label(frame, text=val, bg=self.field_bg, fg=self.fg, anchor="w",
+                            font=("Segoe UI", 10), padx=12, pady=6)
+            row.pack(fill="x")
+            row.bind("<Enter>", lambda e, r=row: r.configure(bg=self.accent))
+            row.bind("<Leave>", lambda e, r=row: r.configure(bg=self.field_bg))
+            row.bind("<Button-1>", lambda e, v=val: self._select(v))
+        self.popup.bind("<FocusOut>", lambda e: self._close_popup())
+        self.popup.focus_set()
+
+    def _select(self, val):
+        self.variable.set(val)
+        self._close_popup()
+
+    def _close_popup(self):
+        if self.popup is not None:
+            try:
+                self.popup.destroy()
+            except Exception:
+                pass
+            self.popup = None
+
+    def pack(self, **kw):
+        self.frame.pack(**kw)
+
+
 class ToolTip:
     """A small delayed hover tooltip for any Tk/ttk widget. Works for
     text-only icon buttons (where there's no visible label to explain
@@ -1263,7 +1379,7 @@ class LoopCrossfadeGUI:
         self.tk, self.filedialog, self.messagebox, self.ttk = tk, filedialog, messagebox, ttk
 
         self.root = TkinterDnD.Tk() if DND_AVAILABLE else tk.Tk()
-        self.root.title("Loop Crossfade")
+        self.root.title("FermaLoop")
         self.root.configure(bg=BG)
         self.window_sizes = load_window_sizes()
 
@@ -1289,6 +1405,9 @@ class LoopCrossfadeGUI:
         self.preview_mode = False  # True while the player holds a processed preview, not raw audio
         self._wave_photo = None    # keep a reference so PIL's PhotoImage isn't garbage collected
         self._icon_cache = {}      # keeps icon PhotoImage references alive too
+        self._loop_anim_after_id = None
+        self._loop_anim_frames = None
+        self._loop_anim_index = 0
         self._last_tooltip = None
         self._play_tooltip = None
         self.player = AudioPlayer()
@@ -1301,7 +1420,7 @@ class LoopCrossfadeGUI:
         self.auto_xfade_var = tk.BooleanVar(value=False)   # OFF by default, per spec
         self.snap_var = tk.BooleanVar(value=False)
         self.window_var = tk.StringVar(value="0.25")
-        self.loop_var = tk.BooleanVar(value=False)
+        self.repeat_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Drag an audio file onto this window, or click Browse.")
         self.time_var = tk.StringVar(value="00:00.000")
         self.selection_duration_var = tk.StringVar(value="Selection: --")
@@ -1353,17 +1472,18 @@ class LoopCrossfadeGUI:
         style.map("AuditionOn.TButton", background=[("active", AUDITION_ON_HOVER)])
         style.configure("Icon.TButton", background=PANEL, foreground=FG, borderwidth=0, padding=9)
         style.map("Icon.TButton", background=[("active", BORDER)])
+        style.configure("IconFlash.TButton", background=ACCENT, foreground="#ffffff", borderwidth=0, padding=9)
         style.configure("IconToggleOn.TButton", background=ACCENT, foreground="#ffffff", borderwidth=0, padding=9)
         style.map("IconToggleOn.TButton", background=[("active", ACCENT_HOVER)])
 
     # ---------------- icon buttons / tooltips ----------------
 
-    def _get_icon(self, name, size=None, color=FG):
+    def _get_icon(self, name, size=None, color=FG, rotation_deg=0):
         size = size or self.ICON_SIZE
-        key = (name, size, color)
+        key = (name, size, color, rotation_deg)
         if key not in self._icon_cache:
             if PIL_AVAILABLE:
-                img = render_icon_image(name, size, color)
+                img = render_icon_image(name, size, color, rotation_deg=rotation_deg)
                 self._icon_cache[key] = ImageTk.PhotoImage(img)
             else:
                 self._icon_cache[key] = None
@@ -1386,6 +1506,56 @@ class LoopCrossfadeGUI:
         if self._play_tooltip is not None:
             self._play_tooltip.text = "Pause" if playing else "Play"
 
+    # ---------------- Loop (animated crossfade-preview) / Repeat icons ----------------
+
+    def _get_loop_animation_frames(self, n_frames=12):
+        key = ("_loop_anim_frames", self.ICON_SIZE, n_frames)
+        if key not in self._icon_cache:
+            frames = [self._get_icon("loop", self.ICON_SIZE, ACCENT, rotation_deg=i * (360 / n_frames))
+                      for i in range(n_frames)]
+            self._icon_cache[key] = frames
+        return self._icon_cache[key]
+
+    def _start_loop_animation(self):
+        if self._loop_anim_after_id is not None:
+            return  # already running
+        self._loop_anim_frames = self._get_loop_animation_frames()
+        self._loop_anim_index = 0
+        self._animate_loop_icon()
+
+    def _animate_loop_icon(self):
+        if not self.preview_mode or self._loop_anim_frames is None:
+            self._loop_anim_after_id = None
+            return
+        self.btn_loop.configure(image=self._loop_anim_frames[self._loop_anim_index])
+        self._loop_anim_index = (self._loop_anim_index + 1) % len(self._loop_anim_frames)
+        self._loop_anim_after_id = self.root.after(90, self._animate_loop_icon)
+
+    def _stop_loop_animation(self):
+        if self._loop_anim_after_id is not None:
+            try:
+                self.root.after_cancel(self._loop_anim_after_id)
+            except Exception:
+                pass
+            self._loop_anim_after_id = None
+        icon = self._get_icon("loop", self.ICON_SIZE, FG)
+        if icon is not None:
+            self.btn_loop.configure(image=icon)
+
+    def _refresh_repeat_icon(self):
+        """Repeat's displayed color reflects its own state, EXCEPT while the
+        Loop crossfade-preview is actively playing -- Loop supersedes plain
+        Repeat (it loops too, plus applies the crossfade), so Repeat's own
+        color is visually suppressed to grey for the duration without
+        actually changing its stored value."""
+        if self.preview_mode:
+            icon = self._get_icon("repeat", self.ICON_SIZE, FG)
+        else:
+            color = ACCENT if self.repeat_var.get() else FG
+            icon = self._get_icon("repeat", self.ICON_SIZE, color)
+        if icon is not None:
+            self.btn_repeat.configure(image=icon)
+
     # ---------------- widget layout ----------------
 
     def _build_widgets(self):
@@ -1393,7 +1563,7 @@ class LoopCrossfadeGUI:
         outer = ttk.Frame(self.root, padding=16)
         outer.pack(fill="both", expand=True)
 
-        ttk.Label(outer, text="Loop Crossfade", style="Heading.TLabel").pack(anchor="w")
+        ttk.Label(outer, text="FermaLoop", style="Heading.TLabel").pack(anchor="w")
         ttk.Label(outer, text="Drag & drop a file, select a region, audition the loop, then save.",
                   style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
 
@@ -1455,11 +1625,6 @@ class LoopCrossfadeGUI:
         btn_zoom_fit.pack(side="left", padx=4)
         ToolTip(btn_zoom_fit, "Zoom the waveform view out to show the whole file")
 
-        self.btn_redo = self._make_icon_button(zoom_row, "redo", "Redo", self.redo, size=self.ICON_SIZE)
-        self.btn_redo.pack(side="right", padx=4)
-        self.btn_undo = self._make_icon_button(zoom_row, "undo", "Undo", self.undo, size=self.ICON_SIZE)
-        self.btn_undo.pack(side="right", padx=(4, 0))
-
         # transport
         transport = ttk.Frame(outer); transport.pack(fill="x", pady=(4, 4))
 
@@ -1470,21 +1635,24 @@ class LoopCrossfadeGUI:
         self.btn_stop = self._make_icon_button(transport, "stop", "Stop", self.on_stop, size=self.ICON_SIZE)
         self.btn_stop.pack(side="left", padx=4)
 
-        self.btn_loop = self._make_icon_button(transport, "loop", "Toggle Loop", self.on_loop_toggle, size=self.ICON_SIZE)
-        self.btn_loop.pack(side="left", padx=4)
+        self.btn_repeat = self._make_icon_button(transport, "repeat",
+                                                   "Repeat (loop the raw selection -- no crossfade, "
+                                                   "you'll hear a click at the seam)",
+                                                   self.on_repeat_toggle, size=self.ICON_SIZE)
+        self.btn_repeat.pack(side="left", padx=4)
 
-        self.audition_label_var = tk.StringVar(value="\u25b6 Audition Loop")
-        self.btn_audition = ttk.Button(transport, textvariable=self.audition_label_var,
-                                        style="Accent.TButton", command=self.on_audition)
-        self.btn_audition.pack(side="left", padx=(16, 4))
-        ToolTip(self.btn_audition, "Preview the current selection's crossfade, looped, without saving")
+        self.btn_loop = self._make_icon_button(transport, "loop",
+                                                 "Loop (play the processed/crossfaded selection, looped)",
+                                                 self.on_loop_preview, size=self.ICON_SIZE)
+        self.btn_loop.pack(side="left", padx=(16, 4))
 
         self.btn_crop = self._make_icon_button(transport, "crop", "Crop to Selection", self.on_crop, size=self.ICON_SIZE)
         self.btn_crop.pack(side="left", padx=4)
 
-        btn_stretch = ttk.Button(transport, text="Stretch...", command=self.open_stretch_dialog)
+        btn_stretch = self._make_icon_button(transport, "stretch",
+                                              "PaulXStretch: extreme time-stretch the current selection",
+                                              self.open_stretch_dialog, size=self.ICON_SIZE)
         btn_stretch.pack(side="left", padx=4)
-        ToolTip(btn_stretch, "PaulXStretch: extreme time-stretch the current selection")
 
         btn_shortcuts = ttk.Button(transport, text="Keyboard Shortcuts...", command=self.open_shortcuts_dialog)
         btn_shortcuts.pack(side="right")
@@ -1528,10 +1696,10 @@ class LoopCrossfadeGUI:
 
         row = ttk.Frame(outer); row.pack(fill="x", pady=(8, 4))
         ttk.Label(row, text="Curve:", style="Muted.TLabel").pack(side="left", padx=(24, 6))
-        curve_combo = ttk.Combobox(row, textvariable=self.curve_var, values=["Equal power", "Linear"],
-                     state="readonly", width=14)
+        curve_combo = RoundedDropdown(row, self.curve_var, ["Equal power", "Linear"],
+                                       BG, FIELD_BG, FG, BORDER, ACCENT, height=28, radius=8, width=130)
         curve_combo.pack(side="left")
-        ToolTip(curve_combo, "Equal power: smoother, constant perceived loudness through the fade.\n"
+        ToolTip(curve_combo.frame, "Equal power: smoother, constant perceived loudness through the fade.\n"
                               "Linear: simpler ramp, can dip slightly in the middle.")
 
         ttk.Frame(outer, height=1, style="Panel.TFrame").pack(fill="x", pady=14)
@@ -1595,7 +1763,7 @@ class LoopCrossfadeGUI:
     def load_file(self, path):
         ext = os.path.splitext(path)[1].lower()
         if ext not in SUPPORTED_EXTS:
-            self.messagebox.showerror("Loop Crossfade", f"Unsupported file type: {ext}")
+            self.messagebox.showerror("FermaLoop", f"Unsupported file type: {ext}")
             return
         try:
             self.status_var.set("Loading...")
@@ -1603,7 +1771,7 @@ class LoopCrossfadeGUI:
             data, sr, sampwidth = decode_to_pcm(path)
         except Exception as e:
             self.status_var.set("Failed to load file.")
-            self.messagebox.showerror("Loop Crossfade", str(e))
+            self.messagebox.showerror("FermaLoop", str(e))
             return
 
         self.data, self.sr, self.sampwidth = data, sr, sampwidth
@@ -1612,7 +1780,7 @@ class LoopCrossfadeGUI:
         self.sel_start, self.sel_end = 0, len(data)
         self.zoom_start, self.zoom_end = 0, len(data)
         self.preview_mode = False
-        self._update_audition_button_style()
+        self._refresh_loop_and_repeat_icons()
         self.undo_stack.clear()
         self.redo_stack.clear()
         self.player.load(data, sr)
@@ -1640,7 +1808,7 @@ class LoopCrossfadeGUI:
         self.cropped = snap["cropped"]
         self.zoom_start, self.zoom_end = snap["zoom_start"], snap["zoom_end"]
         self.preview_mode = False
-        self._update_audition_button_style()
+        self._refresh_loop_and_repeat_icons()
         self.player.load(self.data, self.sr)
         self.player.set_selection(self.sel_start, self.sel_end)
         self._redraw()
@@ -1908,7 +2076,7 @@ class LoopCrossfadeGUI:
                     # was auditioning: keep looping, just re-process for the
                     # new selection, instead of dropping back to raw audio
                     self.player.set_selection(self.sel_start, self.sel_end)
-                    self.on_audition(silent=True)
+                    self.on_loop_preview(silent=True)
             self._update_selection_duration_label()
             if self.sel_end > self.sel_start:
                 self.player.set_selection(self.sel_start, self.sel_end)
@@ -1993,13 +2161,16 @@ class LoopCrossfadeGUI:
 
     # ---------------- transport ----------------
 
-    def _update_audition_button_style(self):
+    def _refresh_loop_and_repeat_icons(self):
+        """Keeps the Loop button's animation state and the Repeat button's
+        suppressed/normal color in sync with self.preview_mode. Loop's
+        button background never changes -- only its icon (grey static vs
+        blue animated) communicates state, matching the confirmed design."""
         if self.preview_mode:
-            self.btn_audition.configure(style="AuditionOn.TButton")
-            self.audition_label_var.set("\u25a0 Auditioning (click to stop)")
+            self._start_loop_animation()
         else:
-            self.btn_audition.configure(style="Accent.TButton")
-            self.audition_label_var.set("\u25b6 Audition Loop")
+            self._stop_loop_animation()
+        self._refresh_repeat_icon()
 
     def _exit_preview_mode(self):
         """Swap the player back to raw (un-processed) audio -- used whenever
@@ -2010,25 +2181,33 @@ class LoopCrossfadeGUI:
         self.player.load(self.data, self.sr)
         self.player.set_selection(self.sel_start, self.sel_end)
         self.preview_mode = False
-        self._update_audition_button_style()
+        self._refresh_loop_and_repeat_icons()
+
+    def _flash_button(self, btn, duration_ms=180):
+        """Brief blue flash for press feedback, settling back to the
+        normal grey icon-button look."""
+        btn.configure(style="IconFlash.TButton")
+        self.root.after(duration_ms, lambda: btn.configure(style="Icon.TButton"))
 
     def on_play_pause(self):
         if self.data is None:
             return
         if not SOUNDDEVICE_AVAILABLE:
-            self.messagebox.showinfo("Loop Crossfade", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
+            self.messagebox.showinfo("FermaLoop", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
             return
+        self._flash_button(self.btn_play)
         self._exit_preview_mode()  # plain Play always plays raw source audio
         if self.player.playing:
             self.player.pause()
             self._set_play_pause_icon(False)
         else:
             self.player.set_selection(self.sel_start, self.sel_end)
-            self.player.set_loop(self.loop_var.get())
+            self.player.set_loop(self.repeat_var.get())
             self.player.play()
             self._set_play_pause_icon(True)
 
     def on_stop(self):
+        self._flash_button(self.btn_stop)
         self.player.stop()
         self._set_play_pause_icon(False)
         self._redraw()
@@ -2037,10 +2216,10 @@ class LoopCrossfadeGUI:
         self.player.rewind()
         self._redraw()
 
-    def on_loop_toggle(self):
-        self.loop_var.set(not self.loop_var.get())
-        self.player.set_loop(self.loop_var.get())
-        self.btn_loop.configure(style="IconToggleOn.TButton" if self.loop_var.get() else "Icon.TButton")
+    def on_repeat_toggle(self):
+        self.repeat_var.set(not self.repeat_var.get())
+        self.player.set_loop(self.repeat_var.get())
+        self._refresh_repeat_icon()
 
     def _read_process_params(self, silent=False):
         """Validates and returns (xfade_seconds_or_None, curve, snap, window)
@@ -2055,13 +2234,13 @@ class LoopCrossfadeGUI:
                     raise ValueError
             except ValueError:
                 if not silent:
-                    self.messagebox.showerror("Loop Crossfade", "Crossfade duration must be a positive number of seconds.")
+                    self.messagebox.showerror("FermaLoop", "Crossfade duration must be a positive number of seconds.")
                 return None
         try:
             transient_window = float(self.window_var.get()) if self.snap_var.get() else 0.25
         except ValueError:
             if not silent:
-                self.messagebox.showerror("Loop Crossfade", "Transient search window must be a number of seconds.")
+                self.messagebox.showerror("FermaLoop", "Transient search window must be a number of seconds.")
             return None
         curve = "equal_power" if self.curve_var.get() == "Equal power" else "linear"
         return xfade_seconds, curve, self.snap_var.get(), transient_window
@@ -2075,9 +2254,9 @@ class LoopCrossfadeGUI:
             return
         if self._live_update_after_id is not None:
             self.root.after_cancel(self._live_update_after_id)
-        self._live_update_after_id = self.root.after(250, lambda: self.on_audition(silent=True))
+        self._live_update_after_id = self.root.after(250, lambda: self.on_loop_preview(silent=True))
 
-    def on_audition(self, silent=False):
+    def on_loop_preview(self, silent=False):
         """Toggle: a direct (non-silent) press while already auditioning
         turns it OFF and returns to raw audio. Otherwise processes the
         CURRENT selection (crop not required) and plays it looped, without
@@ -2100,11 +2279,11 @@ class LoopCrossfadeGUI:
 
         if not SOUNDDEVICE_AVAILABLE:
             if not silent:
-                self.messagebox.showinfo("Loop Crossfade", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
+                self.messagebox.showinfo("FermaLoop", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
             return
         if self.sel_end <= self.sel_start:
             if not silent:
-                self.messagebox.showerror("Loop Crossfade", "Select a region on the waveform first.")
+                self.messagebox.showerror("FermaLoop", "Select a region on the waveform first.")
             return
         params = self._read_process_params(silent=silent)
         if params is None:
@@ -2123,30 +2302,28 @@ class LoopCrossfadeGUI:
             self.player.stop()
             self.player.load(preview, self.sr)
             self.preview_mode = True
-            self._update_audition_button_style()
-            self.loop_var.set(True)
+            self._refresh_loop_and_repeat_icons()
             self.player.set_loop(True)
-            self.btn_loop.configure(style="IconToggleOn.TButton")
             self.player.play()
             self._set_play_pause_icon(True)
 
             dur = preview.shape[0] / self.sr
             self.status_var.set(
-                f"Auditioning {dur:.2f}s loop (crossfade {used_xfade*1000:.0f} ms, computed in {elapsed*1000:.0f} ms). "
-                f"Click within the selection to scrub the loop, adjust settings to update live, "
-                f"or click Audition Loop again to stop."
+                f"Looping the processed preview ({dur:.2f}s, crossfade {used_xfade*1000:.0f} ms, "
+                f"computed in {elapsed*1000:.0f} ms). Click within the selection to scrub, adjust "
+                f"settings to update live, or click Loop again to stop."
             )
         except Exception as e:
             self.status_var.set("Audition failed.")
             if not silent:
-                self.messagebox.showerror("Loop Crossfade", str(e))
+                self.messagebox.showerror("FermaLoop", str(e))
 
     def on_crop(self):
         if self.data is None:
             return
         s, e = self.sel_start, self.sel_end
         if e <= s:
-            self.messagebox.showerror("Loop Crossfade", "Select a region on the waveform first.")
+            self.messagebox.showerror("FermaLoop", "Select a region on the waveform first.")
             return
         self.push_undo()
         self.player.stop()
@@ -2155,7 +2332,7 @@ class LoopCrossfadeGUI:
         self.zoom_start, self.zoom_end = 0, len(self.data)
         self.cropped = True
         self.preview_mode = False
-        self._update_audition_button_style()
+        self._refresh_loop_and_repeat_icons()
         self.player.load(self.data, self.sr)
         self._redraw()
         self._update_selection_duration_label()
@@ -2166,7 +2343,7 @@ class LoopCrossfadeGUI:
         if self.data is None:
             return
         if self.sel_end <= self.sel_start:
-            self.messagebox.showerror("Loop Crossfade", "Select a region on the waveform first.")
+            self.messagebox.showerror("FermaLoop", "Select a region on the waveform first.")
             return
 
         # stop any active playback/audition before editing audio underneath
@@ -2257,7 +2434,7 @@ class LoopCrossfadeGUI:
                 self.sel_end = s + stretched.shape[0]
                 self.zoom_start, self.zoom_end = 0, len(self.data)
                 self.preview_mode = False
-                self._update_audition_button_style()
+                self._refresh_loop_and_repeat_icons()
                 self._set_play_pause_icon(False)
                 self.time_var.set("00:00.000")
                 self.player.load(self.data, self.sr)
@@ -2302,9 +2479,9 @@ class LoopCrossfadeGUI:
             "play_pause": self.on_play_pause,
             "stop": self.on_stop,
             "rewind": self.on_rewind,
-            "loop_toggle": self.on_loop_toggle,
+            "loop_toggle": self.on_repeat_toggle,
             "crop": self.on_crop,
-            "audition": self.on_audition,
+            "audition": self.on_loop_preview,
             "undo": self.undo,
             "redo": self.redo,
             "zoom_in": lambda: self._zoom_step(1),
@@ -2406,14 +2583,14 @@ class LoopCrossfadeGUI:
 
     def run_process(self):
         if self.data is None:
-            self.messagebox.showerror("Loop Crossfade", "Load an audio file first.")
+            self.messagebox.showerror("FermaLoop", "Load an audio file first.")
             return
         out_path = self.out_path_var.get()
         if not out_path:
-            self.messagebox.showerror("Loop Crossfade", "Choose a Save As location first.")
+            self.messagebox.showerror("FermaLoop", "Choose a Save As location first.")
             return
         if self.sel_end <= self.sel_start:
-            self.messagebox.showerror("Loop Crossfade", "Select a region on the waveform first.")
+            self.messagebox.showerror("FermaLoop", "Select a region on the waveform first.")
             return
 
         params = self._read_process_params()
@@ -2443,7 +2620,7 @@ class LoopCrossfadeGUI:
             self.status_var.set(msg)
         except Exception as e:
             self.status_var.set("Failed. See error dialog.")
-            self.messagebox.showerror("Loop Crossfade", str(e))
+            self.messagebox.showerror("FermaLoop", str(e))
 
     # ---------------- window sizing ----------------
 
