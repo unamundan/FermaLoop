@@ -806,9 +806,15 @@ class AudioPlayer:
         without this, changing the selection or toggling Repeat mid-
         playback had no effect on the ALREADY-RUNNING stream, since the
         bounds were previously frozen only at the moment play() was first
-        called."""
-        if self.sel_start <= self.cursor < self.sel_end:
-            self.play_start, self.play_end, self.play_loop = self.sel_start, self.sel_end, self.loop
+        called.
+
+        The selection only constrains playback when self.loop is actually
+        enabled (Repeat, or the Loop crossfade-preview, both set this).
+        Previously this only checked cursor position, so merely HAVING a
+        selection defined -- even with Repeat/Loop both off -- silently
+        clipped ordinary playback to stop at the selection's end."""
+        if self.loop and self.sel_start <= self.cursor < self.sel_end:
+            self.play_start, self.play_end, self.play_loop = self.sel_start, self.sel_end, True
         else:
             self.play_start, self.play_end, self.play_loop = 0, len(self.data), False
 
@@ -1121,6 +1127,22 @@ def render_icon_image(name, size, color_hex, supersample=6, rotation_deg=0):
         draw.line([(pad, pad + L), (pad, pad), (pad + L, pad)], fill=color, width=w, joint="curve")
         draw.line([(sw - pad, sw - pad - L), (sw - pad, sw - pad), (sw - pad - L, sw - pad)],
                    fill=color, width=w, joint="curve")
+    elif name == "gear":
+        outer_r, inner_r, n_teeth, tooth_w_deg = sw * 0.38, sw * 0.27, 8, 20
+        for i in range(n_teeth):
+            base_angle = i * (360 / n_teeth)
+            a0 = math.radians(base_angle - tooth_w_deg / 2)
+            a1 = math.radians(base_angle + tooth_w_deg / 2)
+            pts = [
+                (cx + inner_r * math.cos(a0), cy + inner_r * math.sin(a0)),
+                (cx + outer_r * math.cos(a0), cy + outer_r * math.sin(a0)),
+                (cx + outer_r * math.cos(a1), cy + outer_r * math.sin(a1)),
+                (cx + inner_r * math.cos(a1), cy + inner_r * math.sin(a1)),
+            ]
+            draw.polygon(pts, fill=color)
+        draw.ellipse([cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r], fill=color)
+        hole_r = sw * 0.15
+        draw.ellipse([cx - hole_r, cy - hole_r, cx + hole_r, cy + hole_r], fill=(0, 0, 0, 0))
     elif name in ("undo", "redo"):
         clockwise = (name == "redo")
         r = sw * 0.27
@@ -1593,9 +1615,11 @@ class LoopCrossfadeGUI:
         outer = ttk.Frame(self.root, padding=16)
         outer.pack(fill="both", expand=True)
 
-        ttk.Label(outer, text="FermaLoop", style="Heading.TLabel").pack(anchor="w")
-        ttk.Label(outer, text="Drag & drop a file, select a region, audition the loop, then save.",
-                  style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
+        header_row = ttk.Frame(outer); header_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(header_row, text="FermaLoop", style="Heading.TLabel").pack(side="left")
+        btn_gear = self._make_icon_button(header_row, "gear", "Keyboard Shortcuts...",
+                                           self.open_shortcuts_dialog, size=20)
+        btn_gear.pack(side="right")
 
         # file row (rounded entries)
         row = ttk.Frame(outer); row.pack(fill="x", pady=3)
@@ -1663,9 +1687,9 @@ class LoopCrossfadeGUI:
         self.btn_repeat.pack(side="left", padx=4)
 
         self.btn_loop = self._make_icon_button(transport, "loop",
-                                                 "Loop (play the processed/crossfaded selection, looped). "
-                                                 "Loop previews the current selection's crossfade without "
-                                                 "saving or cropping.",
+                                                 "Audition Loop (play the processed/crossfaded selection, "
+                                                 "looped). Previews the current selection's crossfade "
+                                                 "without saving or cropping.",
                                                  self.on_loop_preview, size=self.ICON_SIZE)
         self.btn_loop.pack(side="left", padx=(16, 4))
 
@@ -1680,44 +1704,42 @@ class LoopCrossfadeGUI:
                                               self.open_stretch_dialog, size=self.ICON_SIZE)
         btn_stretch.pack(side="left", padx=4)
 
-        btn_shortcuts = ttk.Button(transport, text="Keyboard Shortcuts...", command=self.open_shortcuts_dialog)
-        btn_shortcuts.pack(side="right")
-        ToolTip(btn_shortcuts, "View or remap keyboard shortcuts")
-
         ttk.Frame(outer, height=1, style="Panel.TFrame").pack(fill="x", pady=14)
 
-        # processing options (rounded checkboxes)
-        row = ttk.Frame(outer); row.pack(fill="x", pady=4)
-        snap_cb = RoundedCheckbutton(row, "Snap loop points to transients (beat / articulation alignment)",
+        # processing options: Snap and Auto-detect side by side to save vertical space
+        options_row = ttk.Frame(outer); options_row.pack(fill="x", pady=4)
+        left_col = ttk.Frame(options_row); left_col.pack(side="left", fill="both", expand=True)
+        right_col = ttk.Frame(options_row); right_col.pack(side="left", fill="both", expand=True)
+
+        snap_cb = RoundedCheckbutton(left_col, "Snap loop points to transients",
                             self.snap_var, BG, FG, FIELD_BG, ACCENT, BORDER,
                             command=self._toggle_window_entry)
-        snap_cb.pack(side="left")
+        snap_cb.pack(anchor="w")
         ToolTip(snap_cb.frame, "Trim the selection to the strongest nearby attack at each end,\n"
                                 "so the loop starts/ends on the beat instead of an arbitrary sample")
-        row = ttk.Frame(outer); row.pack(fill="x", pady=(0, 10))
-        ttk.Label(row, text="Search window(s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
-        self.window_entry = RoundedEntry(row, self.window_var, BG, FIELD_BG, FG, BORDER,
+        field_row = ttk.Frame(left_col); field_row.pack(anchor="w", pady=(4, 0))
+        ttk.Label(field_row, text="Search window(s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
+        self.window_entry = RoundedEntry(field_row, self.window_var, BG, FIELD_BG, FG, BORDER,
                                           height=28, radius=8, width=70)
         self.window_entry.pack(side="left")
         self.window_entry.configure(state="disabled")
         ToolTip(self.window_entry.frame, "How far from each end to search for a transient (seconds)")
 
-        row = ttk.Frame(outer); row.pack(fill="x", pady=4)
-        auto_cb = RoundedCheckbutton(row, "Auto-detect crossfade length", self.auto_xfade_var,
+        auto_cb = RoundedCheckbutton(right_col, "Auto-detect crossfade length", self.auto_xfade_var,
                             BG, FG, FIELD_BG, ACCENT, BORDER,
                             command=self._toggle_xfade_entry)
-        auto_cb.pack(side="left")
+        auto_cb.pack(anchor="w")
         ToolTip(auto_cb.frame, "Automatically pick the crossfade length that best matches\n"
                                 "the head and tail of the selection, instead of a fixed value")
-        row = ttk.Frame(outer); row.pack(fill="x", pady=(0, 4))
-        ttk.Label(row, text="Manual crossfade(s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
-        self.xfade_entry = RoundedEntry(row, self.xfade_var, BG, FIELD_BG, FG, BORDER,
+        field_row2 = ttk.Frame(right_col); field_row2.pack(anchor="w", pady=(4, 0))
+        ttk.Label(field_row2, text="Manual crossfade(s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
+        self.xfade_entry = RoundedEntry(field_row2, self.xfade_var, BG, FIELD_BG, FG, BORDER,
                                          height=28, radius=8, width=70)
         self.xfade_entry.pack(side="left")
         ToolTip(self.xfade_entry.frame, "Crossfade duration in seconds (used when auto-detect is off)")
 
-        row = ttk.Frame(outer); row.pack(fill="x", pady=(8, 4))
-        ttk.Label(row, text="Curve:", style="Muted.TLabel").pack(side="left", padx=(24, 6))
+        row = ttk.Frame(outer); row.pack(fill="x", pady=(10, 4))
+        ttk.Label(row, text="Curve:", style="Muted.TLabel").pack(side="left", padx=(0, 6))
         curve_combo = RoundedDropdown(row, self.curve_var, ["Equal power", "Linear"],
                                        BG, FIELD_BG, FG, BORDER, ACCENT, height=28, radius=8, width=130)
         curve_combo.pack(side="left")
@@ -1860,7 +1882,7 @@ class LoopCrossfadeGUI:
         self.canvas.delete("all")
         w = self.canvas.winfo_width() or self.canvas_width
         h = self.canvas.winfo_height() or self.canvas_height
-        self.canvas.create_text(w // 2, h // 2, text="No audio loaded",
+        self.canvas.create_text(w // 2, h // 2, text="Drag & drop audio file, select a region to loop",
                                  fill=MUTED, font=("Segoe UI", 10))
         self.timeline_canvas.delete("all")
 
@@ -2106,6 +2128,7 @@ class LoopCrossfadeGUI:
                     self.on_loop_preview(silent=True)
                 elif self.sel_end > self.sel_start:
                     self.player.set_selection(self.sel_start, self.sel_end)
+                    self._update_auto_crossfade_preview()
             self._update_selection_duration_label()
         self.drag_mode = None
         self.pre_drag_selection = None
@@ -2226,13 +2249,24 @@ class LoopCrossfadeGUI:
             self.messagebox.showinfo("FermaLoop", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
             return
         self._flash_button(self.btn_play)
-        self._exit_preview_mode()  # plain Play always plays raw source audio
         if self.player.playing:
+            # Pause must ONLY pause, wherever the play head currently is --
+            # it must never touch preview_mode/selection/loop state. This
+            # used to call _exit_preview_mode() unconditionally before this
+            # check, which (while Loop was active) stopped the stream,
+            # reset the cursor to the selection start, and turned Loop off
+            # -- i.e. pressing Pause looked like it restarted playback
+            # instead of pausing it.
             self.player.pause()
             self._set_play_pause_icon(False)
         else:
-            self.player.set_selection(self.sel_start, self.sel_end)
-            self.player.set_loop(self.repeat_var.get())
+            if not self.preview_mode:
+                # only touch selection/loop when starting fresh RAW playback;
+                # while a processed Loop preview is paused, resuming it must
+                # reuse the player's own (already-correct) internal bounds,
+                # not overwrite them with raw file-space selection indices
+                self.player.set_selection(self.sel_start, self.sel_end)
+                self.player.set_loop(self.repeat_var.get())
             self.player.play()
             self._set_play_pause_icon(True)
 
@@ -2276,15 +2310,44 @@ class LoopCrossfadeGUI:
         return xfade_seconds, curve, self.snap_var.get(), transient_window
 
     def _on_param_changed(self, *args):
-        """Live-update hook: if we're currently auditioning, re-process and
-        keep looping automatically when crossfade/curve/snap settings
-        change, instead of requiring Stop + Audition again. Debounced so
-        typing a number doesn't reprocess on every keystroke."""
-        if not self.preview_mode:
-            return
+        """Live-update hook, debounced so typing a number doesn't reprocess
+        on every keystroke. If we're currently auditioning, re-process and
+        keep looping automatically instead of requiring Stop + Audition
+        again. Otherwise, if Auto-detect is on, just compute and display
+        what crossfade length it would currently pick, so toggling the
+        checkbox (or changing the selection/curve/snap settings) gives
+        immediate feedback without requiring playback."""
         if self._live_update_after_id is not None:
             self.root.after_cancel(self._live_update_after_id)
-        self._live_update_after_id = self.root.after(250, lambda: self.on_loop_preview(silent=True))
+        if self.preview_mode:
+            self._live_update_after_id = self.root.after(250, lambda: self.on_loop_preview(silent=True))
+        else:
+            self._live_update_after_id = self.root.after(250, self._update_auto_crossfade_preview)
+
+    def _update_auto_crossfade_preview(self):
+        """Computes (without playing or saving) what Auto-detect would
+        currently pick for the selection, and shows it in the status bar --
+        the only other place this number normally appears is after actually
+        running Loop/Process & Save, which requires playback/saving first."""
+        if self.data is None or self.preview_mode:
+            return
+        if not self.auto_xfade_var.get():
+            return
+        if self.sel_end <= self.sel_start:
+            return
+        try:
+            segment = self.data[self.sel_start:self.sel_end]
+            curve = "equal_power" if self.curve_var.get() == "Equal power" else "linear"
+            if self.snap_var.get():
+                window = float(self.window_var.get())
+                segment, _, _ = snap_to_transients(segment, self.sr, window)
+            xfade = auto_select_xfade(segment, self.sr, curve=curve)
+            self.status_var.set(
+                f"Auto-detected crossfade for the current selection: {xfade * 1000:.0f} ms. "
+                f"Click Audition Loop to preview it, or Process & Save to use it."
+            )
+        except Exception:
+            pass  # non-fatal -- this is just a live status hint
 
     def on_loop_preview(self, silent=False):
         """Toggle: a direct (non-silent) press while already auditioning
@@ -2341,7 +2404,7 @@ class LoopCrossfadeGUI:
             self.status_var.set(
                 f"Looping the processed preview ({dur:.2f}s, crossfade {used_xfade*1000:.0f} ms, "
                 f"computed in {elapsed*1000:.0f} ms). Click within the selection to scrub, adjust "
-                f"settings to update live, or click Loop again to stop."
+                f"settings to update live, or click Audition Loop again to stop."
             )
         except Exception as e:
             self.status_var.set("Audition failed.")
