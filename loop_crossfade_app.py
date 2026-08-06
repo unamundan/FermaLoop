@@ -460,8 +460,97 @@ def auto_select_xfade(data, sr, curve="equal_power",
 
 
 # ---------------------------------------------------------------------------
-# End-to-end pipeline
+# PaulXStretch -- extreme time-stretch via phase randomization
 # ---------------------------------------------------------------------------
+
+def _paulstretch_mono(data, samplerate, stretch_factor, window_seconds, rng=None):
+    """Core single-channel PaulStretch algorithm (Nasca Octavian Paul's
+    'Paul's Extreme Sound Stretch', as extended by PaulXStretch).
+
+    Unlike a phase vocoder or granular stretcher -- which try to preserve
+    phase relationships between analysis frames and pay for it with
+    metallic/comb-filtered artifacts at extreme ratios -- this deliberately
+    RANDOMIZES the phase of every FFT bin per frame while keeping the
+    magnitude spectrum intact. That destroys phase coherence (so
+    transients and rhythm smear into a diffuse texture) but avoids the
+    usual comb-filter/phasiness artifacts, which is why it holds up at
+    stretch factors of 10x-100x+ where other methods fall apart. It's
+    suited to ambient/drone/texture material, not rhythmic content --
+    that smearing is inherent to the technique, not a bug.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    data = np.asarray(data, dtype=np.float64)
+    n = len(data)
+    if n < 4:
+        return data.copy()
+
+    windowsize = int(window_seconds * samplerate)
+    windowsize = max(16, windowsize)
+    windowsize += windowsize % 2  # force even
+    half_windowsize = windowsize // 2
+
+    window = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(windowsize) / (windowsize - 1))
+    padded = np.concatenate([data, np.zeros(windowsize)])
+
+    start_pos = 0.0
+    displace_pos = (windowsize * 0.5) / stretch_factor
+
+    out_len_guess = int(n / max(displace_pos, 1e-9) * half_windowsize) + windowsize * 4
+    output = np.zeros(out_len_guess)
+    out_pos = 0
+
+    while True:
+        istart = int(start_pos)
+        if istart + windowsize > len(padded):
+            break
+        buf = padded[istart:istart + windowsize] * window
+
+        spec = np.fft.rfft(buf)
+        magnitude = np.abs(spec)
+        phase = rng.uniform(0, 2 * np.pi, size=magnitude.shape)
+        new_spec = magnitude * np.exp(1j * phase)
+        new_buf = np.fft.irfft(new_spec, n=windowsize) * window
+
+        if out_pos + windowsize > len(output):
+            output = np.concatenate([output, np.zeros(len(output) + windowsize)])
+        output[out_pos:out_pos + windowsize] += new_buf
+
+        out_pos += half_windowsize
+        start_pos += displace_pos
+        if start_pos >= n:
+            break
+
+    output = output[:out_pos]
+
+    # Overlap-add with randomized phase alters overall level in a way that's
+    # not a fixed constant (depends on window/overlap), so match RMS to the
+    # input rather than deriving the exact theoretical compensation factor.
+    in_rms = np.sqrt(np.mean(data ** 2) + 1e-12)
+    out_rms = np.sqrt(np.mean(output ** 2) + 1e-12)
+    if out_rms > 1e-9:
+        output *= (in_rms / out_rms)
+    return output
+
+
+def paulstretch(data, samplerate, stretch_factor, window_seconds=0.25):
+    """Multi-channel wrapper: stretches each channel independently (each
+    gets its own random phase draw, same as the reference implementation --
+    this is fine, even desirable, for wide ambient stereo texture, though
+    it means stereo channels are no longer phase-correlated the way the
+    original recording was)."""
+    was_1d = data.ndim == 1
+    if was_1d:
+        data = data[:, None]
+    n_channels = data.shape[1]
+    stretched_channels = [
+        _paulstretch_mono(data[:, ch], samplerate, stretch_factor, window_seconds)
+        for ch in range(n_channels)
+    ]
+    min_len = min(len(c) for c in stretched_channels)
+    result = np.stack([c[:min_len] for c in stretched_channels], axis=1)
+    return result[:, 0] if was_1d else result
+
 
 # ---------------------------------------------------------------------------
 # End-to-end pipeline
@@ -518,6 +607,7 @@ DEFAULT_SHORTCUTS = {
     "zoom_in": "equal",
     "zoom_out": "minus",
     "zoom_fit": "0",
+    "stretch": "x",
 }
 
 SHORTCUT_LABELS = {
@@ -532,6 +622,7 @@ SHORTCUT_LABELS = {
     "zoom_in": "Zoom In",
     "zoom_out": "Zoom Out",
     "zoom_fit": "Zoom to Fit",
+    "stretch": "PaulXStretch...",
 }
 
 SHORTCUTS_PATH = os.path.join(os.path.expanduser("~"), ".loop_crossfade_shortcuts.json")
@@ -603,7 +694,19 @@ class AudioPlayer:
     """Selection-aware playback: play/pause/stop/rewind, optional
     continuous loop over [sel_start, sel_end). Works on whatever buffer
     is currently loaded (pre- or post-crop -- the GUI just calls load()
-    again after cropping)."""
+    again after cropping).
+
+    Important: sel_start/sel_end describe the marked LOOP region, not a
+    hard boundary on where playback is allowed. Clicking outside that
+    region should still be able to play -- so play() decides, at the
+    moment it's called, whether the cursor is inside the loop region
+    (play_start/play_end become the selection, honoring `loop`) or
+    outside it (play_start/play_end become the whole buffer, never
+    looping). That decision is frozen in play_start/play_end/play_loop
+    for the duration of that playback, rather than re-evaluated per
+    audio callback -- so scrubbing into the selection mid-playback
+    doesn't suddenly start looping unexpectedly.
+    """
 
     def __init__(self):
         self.data = None          # float32, shape (n, channels)
@@ -615,6 +718,9 @@ class AudioPlayer:
         self.playing = False
         self.lock = threading.Lock()
         self.stream = None
+        self.play_start = 0       # effective bounds for the CURRENT playback
+        self.play_end = 0
+        self.play_loop = False
         self.on_natural_stop = None  # optional callback, called from GUI thread via `after`
 
     def load(self, data, sr):
@@ -625,14 +731,24 @@ class AudioPlayer:
         self.sr = sr
         with self.lock:
             self.sel_start, self.sel_end, self.cursor = 0, len(self.data), 0
+            self.play_start, self.play_end = 0, len(self.data)
 
     def set_selection(self, start, end):
+        """Updates the marked loop region. Deliberately does NOT move the
+        cursor -- callers that want to move the cursor (e.g. a click) do
+        so explicitly, so this can't silently clamp a click outside the
+        selection back into it."""
         with self.lock:
             if self.data is None:
                 return
             self.sel_start = max(0, min(start, len(self.data)))
             self.sel_end = max(self.sel_start, min(end, len(self.data)))
-            self.cursor = max(self.sel_start, min(self.cursor, self.sel_end))
+
+    def set_cursor(self, sample):
+        with self.lock:
+            if self.data is None:
+                return
+            self.cursor = max(0, min(sample, len(self.data)))
 
     def set_loop(self, value):
         self.loop = bool(value)
@@ -642,11 +758,11 @@ class AudioPlayer:
             if self.data is None:
                 outdata[:] = 0
                 raise _sd.CallbackStop
-            remaining = self.sel_end - self.cursor
+            remaining = self.play_end - self.cursor
             if remaining <= 0:
-                if self.loop:
-                    self.cursor = self.sel_start
-                    remaining = self.sel_end - self.cursor
+                if self.play_loop:
+                    self.cursor = self.play_start
+                    remaining = self.play_end - self.cursor
                 else:
                     outdata[:] = 0
                     self.playing = False
@@ -659,10 +775,10 @@ class AudioPlayer:
             outdata[:n] = chunk
             self.cursor += n
             if n < frames:
-                if self.loop:
-                    self.cursor = self.sel_start
-                    n2 = min(frames - n, self.sel_end - self.sel_start)
-                    chunk2 = self.data[self.sel_start:self.sel_start + n2]
+                if self.play_loop:
+                    self.cursor = self.play_start
+                    n2 = min(frames - n, self.play_end - self.play_start)
+                    chunk2 = self.data[self.play_start:self.play_start + n2]
                     if chunk2.shape[1] != ch:
                         chunk2 = np.tile(chunk2[:, :1], (1, ch)) if chunk2.shape[1] == 1 else chunk2[:, :ch]
                     outdata[n:n + n2] = chunk2
@@ -677,8 +793,13 @@ class AudioPlayer:
         if not SOUNDDEVICE_AVAILABLE or self.data is None:
             return
         with self.lock:
-            if not (self.sel_start <= self.cursor < self.sel_end):
-                self.cursor = self.sel_start
+            if self.sel_start <= self.cursor < self.sel_end:
+                self.play_start, self.play_end, self.play_loop = self.sel_start, self.sel_end, self.loop
+            else:
+                # cursor is outside the marked loop region (e.g. clicked
+                # elsewhere on the waveform) -- play straight through the
+                # whole buffer instead of snapping back into the selection
+                self.play_start, self.play_end, self.play_loop = 0, len(self.data), False
         channels = self.data.shape[1]
         self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
                                         callback=self._callback, dtype="float32")
@@ -1085,7 +1206,8 @@ class LoopCrossfadeGUI:
                   font=("Segoe UI", 10, "bold")).pack(side="left")
         ttk.Label(info_row, textvariable=self.selection_duration_var, style="Muted.TLabel").pack(side="right")
 
-        ttk.Label(outer, text="Drag to select, drag edges to adjust, click to move the playhead. Scroll to zoom.",
+        ttk.Label(outer, text="Drag to select, drag edges to adjust, click to move the playhead. "
+                               "Scroll to zoom, Shift+Scroll to pan left/right.",
                   style="Muted.TLabel").pack(anchor="w", pady=(0, 4))
 
         # zoom row
@@ -1108,6 +1230,7 @@ class LoopCrossfadeGUI:
         ttk.Button(transport, text="\u25b6 Audition Loop", style="Accent.TButton",
                    command=self.on_audition).pack(side="left", padx=(16, 4))
         ttk.Button(transport, text="Crop to Selection", command=self.on_crop).pack(side="left", padx=4)
+        ttk.Button(transport, text="Stretch...", command=self.open_stretch_dialog).pack(side="left", padx=4)
         ttk.Button(transport, text="Keyboard Shortcuts...", command=self.open_shortcuts_dialog).pack(side="right")
 
         ttk.Label(outer, text="Audition previews the current selection's crossfade without saving or cropping. "
@@ -1470,13 +1593,14 @@ class LoopCrossfadeGUI:
             self.drag_mode = None
             return
         if self.drag_mode == "pending":
-            # a plain click (no meaningful drag): move the playhead there
-            # and show a time flag on the timeline
+            # a plain click (no meaningful drag): move the playhead there --
+            # anywhere in the file, not clamped to the marked selection, so
+            # you can scrub/play outside the loop region to check context
             w = self.canvas.winfo_width()
             samp = self._x_to_sample(event.x, w)
-            self.player.rewind()  # ensure stopped state doesn't fight the seek
-            with self.player.lock:
-                self.player.cursor = max(self.sel_start, min(samp, self.sel_end))
+            samp = max(0, min(samp, len(self.data)))
+            self._exit_preview_mode()  # a raw click always targets self.data, not a processed preview buffer
+            self.player.set_cursor(samp)
             self._show_click_flag(event.x, samp)
             self._redraw()
         elif self.drag_mode in ("start", "end", "new") and self.pre_drag_selection is not None:
@@ -1494,10 +1618,10 @@ class LoopCrossfadeGUI:
                     self.player.set_selection(self.sel_start, self.sel_end)
                     self.on_audition(silent=True)
             self._update_selection_duration_label()
+            if self.sel_end > self.sel_start:
+                self.player.set_selection(self.sel_start, self.sel_end)
         self.drag_mode = None
         self.pre_drag_selection = None
-        if self.sel_end > self.sel_start:
-            self.player.set_selection(self.sel_start, self.sel_end)
 
     # ---------------- zoom ----------------
 
@@ -1531,12 +1655,33 @@ class LoopCrossfadeGUI:
             new_vs = max(0, new_vs - shift); new_ve = n
         self.zoom_start, self.zoom_end = new_vs, new_ve
 
+    def _pan(self, direction):
+        if self.data is None:
+            return
+        n = len(self.data)
+        vs, ve = self.zoom_start, self.zoom_end
+        span = ve - vs
+        step = max(1, int(span * 0.2))
+        delta = step if direction < 0 else -step
+        new_vs = vs + delta
+        new_ve = ve + delta
+        if new_vs < 0:
+            new_ve -= new_vs; new_vs = 0
+        if new_ve > n:
+            shift = new_ve - n
+            new_vs = max(0, new_vs - shift); new_ve = n
+        self.zoom_start, self.zoom_end = new_vs, new_ve
+
     def _on_mousewheel(self, event):
         if self.data is None:
             return
         direction = 1 if (getattr(event, "delta", 0) > 0 or getattr(event, "num", None) == 4) else -1
-        w = self.canvas.winfo_width() or self.canvas_width
-        self._zoom_at(event.x, w, direction)
+        shift_held = bool(event.state & 0x0001)
+        if shift_held:
+            self._pan(direction)
+        else:
+            w = self.canvas.winfo_width() or self.canvas_width
+            self._zoom_at(event.x, w, direction)
         self._redraw()
 
     def zoom_to_fit(self):
@@ -1701,6 +1846,93 @@ class LoopCrossfadeGUI:
         dur = len(self.data) / self.sr
         self.status_var.set(f"Cropped to {dur:.2f}s. (Cmd/Ctrl+Z to undo.)")
 
+    def open_stretch_dialog(self):
+        if self.data is None:
+            return
+        if self.sel_end <= self.sel_start:
+            self.messagebox.showerror("Loop Crossfade", "Select a region on the waveform first.")
+            return
+
+        tk, ttk = self.tk, self.ttk
+        dlg = tk.Toplevel(self.root)
+        dlg.title("PaulXStretch")
+        dlg.configure(bg=BG)
+        dlg.geometry("380x220")
+        dlg.transient(self.root)
+
+        sel_dur = (self.sel_end - self.sel_start) / self.sr
+        ttk.Label(dlg, text=f"Stretching {format_time(sel_dur)} of selected audio.",
+                  background=BG, foreground=FG).pack(anchor="w", padx=14, pady=(14, 4))
+        ttk.Label(dlg, text="Extreme time-stretch via phase randomization -- great for "
+                             "ambient textures/drones, destroys rhythm and transients.",
+                  background=BG, foreground=MUTED, wraplength=350, justify="left",
+                  font=("Segoe UI", 9)).pack(anchor="w", padx=14, pady=(0, 10))
+
+        row = ttk.Frame(dlg); row.pack(fill="x", padx=14, pady=4)
+        ttk.Label(row, text="Stretch factor (x):", background=BG, foreground=FG).pack(side="left")
+        factor_var = tk.StringVar(value="8.0")
+        RoundedEntry(row, factor_var, BG, FIELD_BG, FG, BORDER, height=28, radius=8, width=80).pack(side="right")
+
+        row = ttk.Frame(dlg); row.pack(fill="x", padx=14, pady=4)
+        ttk.Label(row, text="Window size (s):", background=BG, foreground=FG).pack(side="left")
+        window_var = tk.StringVar(value="0.25")
+        RoundedEntry(row, window_var, BG, FIELD_BG, FG, BORDER, height=28, radius=8, width=80).pack(side="right")
+
+        result_label = ttk.Label(dlg, text="", background=BG, foreground=MUTED,
+                                  wraplength=350, justify="left")
+        result_label.pack(anchor="w", padx=14, pady=(8, 0))
+
+        def apply_stretch():
+            try:
+                factor = float(factor_var.get())
+                window_seconds = float(window_var.get())
+                if factor <= 0 or window_seconds <= 0:
+                    raise ValueError
+            except ValueError:
+                self.messagebox.showerror("PaulXStretch", "Stretch factor and window size must be positive numbers.")
+                return
+
+            est_out_sec = sel_dur * factor
+            if est_out_sec > 300 and not self.messagebox.askyesno(
+                    "PaulXStretch",
+                    f"This will produce about {format_time(est_out_sec)} of audio "
+                    f"({est_out_sec/60:.1f} minutes). Continue?"):
+                return
+
+            try:
+                result_label.configure(text="Stretching...")
+                dlg.update_idletasks()
+                s, e = self.sel_start, self.sel_end
+                segment = self.data[s:e]
+                t0 = time.time()
+                stretched = paulstretch(segment, self.sr, factor, window_seconds)
+                elapsed = time.time() - t0
+
+                self.push_undo()
+                self.player.stop()
+                self.data = np.concatenate([self.data[:s], stretched, self.data[e:]], axis=0)
+                self.sel_start = s
+                self.sel_end = s + stretched.shape[0]
+                self.zoom_start, self.zoom_end = 0, len(self.data)
+                self.preview_mode = False
+                self.player.load(self.data, self.sr)
+                self._redraw()
+                self._update_selection_duration_label()
+                self.zoom_to_selection()
+
+                out_dur = stretched.shape[0] / self.sr
+                self.status_var.set(
+                    f"Stretched {sel_dur:.2f}s to {out_dur:.2f}s ({factor:.1f}x) in {elapsed:.1f}s. "
+                    f"(Cmd/Ctrl+Z to undo.) Audition or Crop to build the loop."
+                )
+                dlg.destroy()
+            except Exception as ex:
+                result_label.configure(text=f"Failed: {ex}")
+
+        btn_row = ttk.Frame(dlg); btn_row.pack(fill="x", padx=14, pady=14)
+        ttk.Button(btn_row, text="Cancel", command=dlg.destroy).pack(side="right", padx=(6, 0))
+        ttk.Button(btn_row, text="Stretch", style="Accent.TButton", command=apply_stretch).pack(side="right")
+
     def _poll_playhead(self):
         if self.data is not None and self.player.playing:
             self._redraw()
@@ -1725,6 +1957,7 @@ class LoopCrossfadeGUI:
             "zoom_in": lambda: self._zoom_step(1),
             "zoom_out": lambda: self._zoom_step(-1),
             "zoom_fit": self.zoom_to_fit,
+            "stretch": self.open_stretch_dialog,
         }
 
     def _bind_shortcuts(self):
@@ -1767,7 +2000,7 @@ class LoopCrossfadeGUI:
         dlg = tk.Toplevel(self.root)
         dlg.title("Keyboard Shortcuts")
         dlg.configure(bg=BG)
-        dlg.geometry("380x420")
+        dlg.geometry("380x460")
         dlg.transient(self.root)
 
         rows = {}
