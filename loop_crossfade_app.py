@@ -706,20 +706,35 @@ def resolve_window_size(required_w, required_h, saved):
 def compute_waveform_peaks(data, target_width):
     """Returns (mins, maxs): a mono-mixed min/max amplitude envelope, one
     pair per pixel column, for fast waveform drawing regardless of clip
-    length."""
+    length.
+
+    At extreme zoom (fewer samples in view than target_width), this used
+    to cap the output to n columns and rely on a later Lanczos upscale to
+    stretch it back out -- a 100x+ upscale from a handful of source
+    columns produces visible ringing/banding artifacts (the "malformed
+    shapes" at high magnification). Instead, when there are fewer samples
+    than requested columns, map each output column to its nearest sample
+    directly, producing a clean blocky "staircase" -- the correct way to
+    represent individual samples at extreme zoom, and how professional
+    audio editors render this case."""
     mono = data.mean(axis=1) if data.ndim > 1 else data
     n = len(mono)
     if n == 0:
         return np.zeros(1), np.zeros(1)
-    target_width = max(1, min(target_width, n))
-    edges = np.linspace(0, n, target_width + 1).astype(int)
-    mins = np.empty(target_width)
-    maxs = np.empty(target_width)
-    for i in range(target_width):
-        a, b = edges[i], max(edges[i] + 1, edges[i + 1])
-        chunk = mono[a:b]
-        mins[i] = chunk.min()
-        maxs[i] = chunk.max()
+    target_width = max(1, target_width)
+    if n >= target_width:
+        edges = np.linspace(0, n, target_width + 1).astype(int)
+        mins = np.empty(target_width)
+        maxs = np.empty(target_width)
+        for i in range(target_width):
+            a, b = edges[i], max(edges[i] + 1, edges[i + 1])
+            chunk = mono[a:b]
+            mins[i] = chunk.min()
+            maxs[i] = chunk.max()
+    else:
+        idx = np.linspace(0, n - 1, target_width).round().astype(int)
+        vals = mono[idx]
+        mins, maxs = vals.copy(), vals.copy()
     return mins, maxs
 
 
@@ -783,6 +798,20 @@ class AudioPlayer:
             self.sel_start, self.sel_end, self.cursor = 0, len(self.data), 0
             self.play_start, self.play_end = 0, len(self.data)
 
+    def _apply_bounds_from_cursor(self):
+        """(Re)computes play_start/play_end/play_loop from the current
+        cursor position relative to the marked selection. Called from
+        play() to establish initial bounds, AND from set_selection(),
+        set_loop(), and set_cursor() while a stream is already running --
+        without this, changing the selection or toggling Repeat mid-
+        playback had no effect on the ALREADY-RUNNING stream, since the
+        bounds were previously frozen only at the moment play() was first
+        called."""
+        if self.sel_start <= self.cursor < self.sel_end:
+            self.play_start, self.play_end, self.play_loop = self.sel_start, self.sel_end, self.loop
+        else:
+            self.play_start, self.play_end, self.play_loop = 0, len(self.data), False
+
     def set_selection(self, start, end):
         """Updates the marked loop region. Deliberately does NOT move the
         cursor -- callers that want to move the cursor (e.g. a click) do
@@ -793,15 +822,22 @@ class AudioPlayer:
                 return
             self.sel_start = max(0, min(start, len(self.data)))
             self.sel_end = max(self.sel_start, min(end, len(self.data)))
+            if self.playing:
+                self._apply_bounds_from_cursor()
 
     def set_cursor(self, sample):
         with self.lock:
             if self.data is None:
                 return
             self.cursor = max(0, min(sample, len(self.data)))
+            if self.playing:
+                self._apply_bounds_from_cursor()
 
     def set_loop(self, value):
         self.loop = bool(value)
+        with self.lock:
+            if self.data is not None and self.playing:
+                self._apply_bounds_from_cursor()
 
     def _callback(self, outdata, frames, time_info, status):
         with self.lock:
@@ -843,13 +879,7 @@ class AudioPlayer:
         if not SOUNDDEVICE_AVAILABLE or self.data is None:
             return
         with self.lock:
-            if self.sel_start <= self.cursor < self.sel_end:
-                self.play_start, self.play_end, self.play_loop = self.sel_start, self.sel_end, self.loop
-            else:
-                # cursor is outside the marked loop region (e.g. clicked
-                # elsewhere on the waveform) -- play straight through the
-                # whole buffer instead of snapping back into the selection
-                self.play_start, self.play_end, self.play_loop = 0, len(self.data), False
+            self._apply_bounds_from_cursor()
         channels = self.data.shape[1]
         self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
                                         callback=self._callback, dtype="float32")
@@ -1616,15 +1646,6 @@ class LoopCrossfadeGUI:
                                "Scroll to zoom, Shift+Scroll to pan left/right.",
                   style="Muted.TLabel").pack(anchor="w", pady=(0, 4))
 
-        # zoom row
-        zoom_row = ttk.Frame(outer); zoom_row.pack(fill="x", pady=(0, 8))
-        btn_zoom_sel = ttk.Button(zoom_row, text="Zoom to Selection", command=self.zoom_to_selection)
-        btn_zoom_sel.pack(side="left", padx=(0, 4))
-        ToolTip(btn_zoom_sel, "Zoom the waveform view to fit the current selection")
-        btn_zoom_fit = ttk.Button(zoom_row, text="Zoom to Fit", command=self.zoom_to_fit)
-        btn_zoom_fit.pack(side="left", padx=4)
-        ToolTip(btn_zoom_fit, "Zoom the waveform view out to show the whole file")
-
         # transport
         transport = ttk.Frame(outer); transport.pack(fill="x", pady=(4, 4))
 
@@ -1642,11 +1663,16 @@ class LoopCrossfadeGUI:
         self.btn_repeat.pack(side="left", padx=4)
 
         self.btn_loop = self._make_icon_button(transport, "loop",
-                                                 "Loop (play the processed/crossfaded selection, looped)",
+                                                 "Loop (play the processed/crossfaded selection, looped). "
+                                                 "Loop previews the current selection's crossfade without "
+                                                 "saving or cropping.",
                                                  self.on_loop_preview, size=self.ICON_SIZE)
         self.btn_loop.pack(side="left", padx=(16, 4))
 
-        self.btn_crop = self._make_icon_button(transport, "crop", "Crop to Selection", self.on_crop, size=self.ICON_SIZE)
+        self.btn_crop = self._make_icon_button(transport, "crop",
+                                                 "Crop to Selection. Crop is only needed once you want to "
+                                                 "commit the working range.",
+                                                 self.on_crop, size=self.ICON_SIZE)
         self.btn_crop.pack(side="left", padx=4)
 
         btn_stretch = self._make_icon_button(transport, "stretch",
@@ -1657,10 +1683,6 @@ class LoopCrossfadeGUI:
         btn_shortcuts = ttk.Button(transport, text="Keyboard Shortcuts...", command=self.open_shortcuts_dialog)
         btn_shortcuts.pack(side="right")
         ToolTip(btn_shortcuts, "View or remap keyboard shortcuts")
-
-        ttk.Label(outer, text="Audition previews the current selection's crossfade without saving or cropping. "
-                               "Crop is only needed once you want to commit the working range.",
-                  style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
 
         ttk.Frame(outer, height=1, style="Panel.TFrame").pack(fill="x", pady=14)
 
@@ -2180,6 +2202,9 @@ class LoopCrossfadeGUI:
         self.player.stop()
         self.player.load(self.data, self.sr)
         self.player.set_selection(self.sel_start, self.sel_end)
+        self.player.set_cursor(self.sel_start)  # load() resets cursor to 0; restore it to
+                                                 # the loop start so a following Play resumes
+                                                 # the selection, not the start of the file
         self.preview_mode = False
         self._refresh_loop_and_repeat_icons()
 
