@@ -845,24 +845,31 @@ class RoundedEntry:
     """A ttk.Entry substitute with actual rounded, anti-aliased corners
     (drawn via PIL when available; falls back to a canvas polygon, which
     looks blockier since Tk's canvas doesn't anti-alias, if Pillow isn't
-    installed). Resizes responsively via <Configure>."""
+    installed). Resizes responsively via <Configure> unless a fixed
+    pixel `width` is given (for small fields like a numeric entry)."""
 
-    def __init__(self, parent, textvariable, bg, field_bg, fg, border, height=32, radius=10):
+    def __init__(self, parent, textvariable, bg, field_bg, fg, border, height=32, radius=10, width=None):
         import tkinter as tk
         self.tk = tk
         self.radius = radius
         self.bg, self.field_bg, self.border, self.fg = bg, field_bg, border, fg
+        self.fixed_width = width
         self.frame = tk.Frame(parent, bg=bg)
-        self.canvas = tk.Canvas(self.frame, height=height, bg=bg, highlightthickness=0)
-        self.canvas.pack(fill="x", expand=True)
+        canvas_kwargs = {"height": height, "bg": bg, "highlightthickness": 0}
+        if width is not None:
+            canvas_kwargs["width"] = width
+        self.canvas = tk.Canvas(self.frame, **canvas_kwargs)
+        self.canvas.pack(fill="x" if width is None else None, expand=(width is None))
         self.entry = tk.Entry(self.canvas, textvariable=textvariable, bg=field_bg, fg=fg,
                                insertbackground=fg, relief="flat", highlightthickness=0,
                                bd=0, font=("Segoe UI", 10))
         self._bg_photo = None
         self.canvas.bind("<Configure>", self._redraw)
+        if width is not None:
+            self.canvas.after(1, self._redraw)  # fixed-size canvases don't fire <Configure> reliably on all platforms
 
     def _redraw(self, event=None):
-        w = self.canvas.winfo_width()
+        w = self.fixed_width or self.canvas.winfo_width()
         h = self.canvas.winfo_height()
         if w < 2 or h < 2:
             return
@@ -882,6 +889,9 @@ class RoundedEntry:
 
     def pack(self, **kw):
         self.frame.pack(**kw)
+
+    def configure(self, **kw):
+        self.entry.configure(**kw)
 
 
 class RoundedCheckbutton:
@@ -986,6 +996,11 @@ class LoopCrossfadeGUI:
         self.selection_duration_var = tk.StringVar(value="Selection: --")
         self._click_flag = None       # (x_pixel, time_str) or None
         self._click_flag_after_id = None
+        self._live_update_after_id = None
+
+        for var in (self.xfade_var, self.curve_var, self.auto_xfade_var,
+                    self.snap_var, self.window_var):
+            var.trace_add("write", self._on_param_changed)
 
         self._build_widgets()
         self._bind_shortcuts()
@@ -1107,17 +1122,20 @@ class LoopCrossfadeGUI:
                             self.snap_var, BG, FG, FIELD_BG, ACCENT, BORDER,
                             command=self._toggle_window_entry).pack(side="left")
         row = ttk.Frame(outer); row.pack(fill="x", pady=(0, 10))
-        ttk.Label(row, text="Search window (s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
-        self.window_entry = ttk.Entry(row, textvariable=self.window_var, width=8, state="disabled")
+        ttk.Label(row, text="Search window(s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
+        self.window_entry = RoundedEntry(row, self.window_var, BG, FIELD_BG, FG, BORDER,
+                                          height=28, radius=8, width=70)
         self.window_entry.pack(side="left")
+        self.window_entry.configure(state="disabled")
 
         row = ttk.Frame(outer); row.pack(fill="x", pady=4)
         RoundedCheckbutton(row, "Auto-detect crossfade length", self.auto_xfade_var,
                             BG, FG, FIELD_BG, ACCENT, BORDER,
                             command=self._toggle_xfade_entry).pack(side="left")
         row = ttk.Frame(outer); row.pack(fill="x", pady=(0, 4))
-        ttk.Label(row, text="Manual crossfade (s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
-        self.xfade_entry = ttk.Entry(row, textvariable=self.xfade_var, width=8, state="normal")
+        ttk.Label(row, text="Manual crossfade(s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
+        self.xfade_entry = RoundedEntry(row, self.xfade_var, BG, FIELD_BG, FG, BORDER,
+                                         height=28, radius=8, width=70)
         self.xfade_entry.pack(side="left")
 
         row = ttk.Frame(outer); row.pack(fill="x", pady=(8, 4))
@@ -1301,6 +1319,17 @@ class LoopCrossfadeGUI:
         vs, ve = self._visible_range()
         span_sec = max(1e-6, (ve - vs) / self.sr)
         interval = pick_tick_interval(span_sec)
+        minor_interval = interval / 5.0
+
+        # minor (unlabeled) ticks first so major ticks draw on top of them
+        t = (int(vs / self.sr / minor_interval)) * minor_interval
+        while t <= ve / self.sr + minor_interval:
+            # skip positions that coincide with a major tick (within float tolerance)
+            if abs((t / interval) - round(t / interval)) > 1e-6:
+                x = self._sample_to_x(t * self.sr, w)
+                if -5 <= x <= w + 5:
+                    self.timeline_canvas.create_line(x, h - 3, x, h, fill=BORDER)
+            t += minor_interval
 
         first_tick = (int(vs / self.sr / interval)) * interval
         t = first_tick
@@ -1460,7 +1489,10 @@ class LoopCrossfadeGUI:
                 })
                 self.redo_stack.clear()
                 if self.preview_mode:
-                    self._exit_preview_mode()
+                    # was auditioning: keep looping, just re-process for the
+                    # new selection, instead of dropping back to raw audio
+                    self.player.set_selection(self.sel_start, self.sel_end)
+                    self.on_audition(silent=True)
             self._update_selection_duration_label()
         self.drag_mode = None
         self.pre_drag_selection = None
@@ -1564,9 +1596,11 @@ class LoopCrossfadeGUI:
         self.player.set_loop(self.loop_var.get())
         self.btn_loop.configure(style="ToggleOn.TButton" if self.loop_var.get() else "Toggle.TButton")
 
-    def _read_process_params(self):
+    def _read_process_params(self, silent=False):
         """Validates and returns (xfade_seconds_or_None, curve, snap, window)
-        from the current UI fields, or None if invalid (and shows an error)."""
+        from the current UI fields, or None if invalid. `silent=True` skips
+        the error dialog -- used for live re-audition while the person is
+        still mid-typing a number (e.g. "0." before they finish "0.3")."""
         xfade_seconds = None
         if not self.auto_xfade_var.get():
             try:
@@ -1574,29 +1608,47 @@ class LoopCrossfadeGUI:
                 if xfade_seconds <= 0:
                     raise ValueError
             except ValueError:
-                self.messagebox.showerror("Loop Crossfade", "Crossfade duration must be a positive number of seconds.")
+                if not silent:
+                    self.messagebox.showerror("Loop Crossfade", "Crossfade duration must be a positive number of seconds.")
                 return None
         try:
             transient_window = float(self.window_var.get()) if self.snap_var.get() else 0.25
         except ValueError:
-            self.messagebox.showerror("Loop Crossfade", "Transient search window must be a number of seconds.")
+            if not silent:
+                self.messagebox.showerror("Loop Crossfade", "Transient search window must be a number of seconds.")
             return None
         curve = "equal_power" if self.curve_var.get() == "Equal power" else "linear"
         return xfade_seconds, curve, self.snap_var.get(), transient_window
 
-    def on_audition(self):
+    def _on_param_changed(self, *args):
+        """Live-update hook: if we're currently auditioning, re-process and
+        keep looping automatically when crossfade/curve/snap settings
+        change, instead of requiring Stop + Audition again. Debounced so
+        typing a number doesn't reprocess on every keystroke."""
+        if not self.preview_mode:
+            return
+        if self._live_update_after_id is not None:
+            self.root.after_cancel(self._live_update_after_id)
+        self._live_update_after_id = self.root.after(250, lambda: self.on_audition(silent=True))
+
+    def on_audition(self, silent=False):
         """Processes the CURRENT selection (crop not required) and plays it
         looped, without touching self.data or writing any file -- so you can
-        hear whether the crossfade settings are right before committing."""
+        hear whether the crossfade settings are right before committing.
+        `silent=True` is used for automatic live re-audition (selection or
+        parameter changes while already auditioning) -- it skips dialogs and
+        quietly does nothing if the current state isn't ready to process."""
         if self.data is None:
             return
         if not SOUNDDEVICE_AVAILABLE:
-            self.messagebox.showinfo("Loop Crossfade", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
+            if not silent:
+                self.messagebox.showinfo("Loop Crossfade", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
             return
         if self.sel_end <= self.sel_start:
-            self.messagebox.showerror("Loop Crossfade", "Select a region on the waveform first.")
+            if not silent:
+                self.messagebox.showerror("Loop Crossfade", "Select a region on the waveform first.")
             return
-        params = self._read_process_params()
+        params = self._read_process_params(silent=silent)
         if params is None:
             return
         xfade_seconds, curve, snap, window = params
@@ -1626,7 +1678,8 @@ class LoopCrossfadeGUI:
             )
         except Exception as e:
             self.status_var.set("Audition failed.")
-            self.messagebox.showerror("Loop Crossfade", str(e))
+            if not silent:
+                self.messagebox.showerror("Loop Crossfade", str(e))
 
     def on_crop(self):
         if self.data is None:
