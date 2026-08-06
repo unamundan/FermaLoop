@@ -38,6 +38,11 @@ DEPENDENCIES
         pip install tkinterdnd2
     Without it, use the Browse buttons instead -- nothing else is affected.
 
+    For smoother (anti-aliased) waveform rendering:
+        pip install Pillow
+    Without it, the waveform still draws, just with plain 1px canvas lines
+    instead of a supersampled, smoothed fill.
+
     ffmpeg is required for any format other than plain WAV (MP3, MP4/M4A,
     FLAC, AIFF). Plain WAV works with zero extra dependencies.
         macOS:    brew install ffmpeg
@@ -59,7 +64,7 @@ Command line (unaffected by the GUI changes above):
 --------------------------------------------------------------------------
 PACKAGING AS A NATIVE APP
 --------------------------------------------------------------------------
-    pip install pyinstaller sounddevice tkinterdnd2
+    pip install pyinstaller sounddevice tkinterdnd2 Pillow
     pyinstaller --onefile --windowed --collect-all sounddevice --collect-all tkinterdnd2 loop_crossfade_app.py
 The result in dist/ is a standalone double-clickable app (still needs
 ffmpeg on the target machine for non-WAV formats, unless bundled -- see
@@ -70,6 +75,7 @@ import os
 import re
 import sys
 import json
+import time
 import wave
 import struct
 import shutil
@@ -506,6 +512,12 @@ DEFAULT_SHORTCUTS = {
     "rewind": "Home",
     "loop_toggle": "l",
     "crop": "c",
+    "audition": "a",
+    "undo": "Control-z",
+    "redo": "Control-y",
+    "zoom_in": "equal",
+    "zoom_out": "minus",
+    "zoom_fit": "0",
 }
 
 SHORTCUT_LABELS = {
@@ -514,6 +526,12 @@ SHORTCUT_LABELS = {
     "rewind": "Rewind",
     "loop_toggle": "Toggle Loop",
     "crop": "Crop to Selection",
+    "audition": "Audition Loop",
+    "undo": "Undo",
+    "redo": "Redo",
+    "zoom_in": "Zoom In",
+    "zoom_out": "Zoom Out",
+    "zoom_fit": "Zoom to Fit",
 }
 
 SHORTCUTS_PATH = os.path.join(os.path.expanduser("~"), ".loop_crossfade_shortcuts.json")
@@ -707,6 +725,12 @@ try:
 except ImportError:
     DND_AVAILABLE = False
 
+try:
+    from PIL import Image, ImageDraw, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
 
 def _parse_dnd_paths(raw):
     """tkinterdnd2 gives dropped paths as a single string, space-separated,
@@ -735,6 +759,111 @@ PLAYHEAD_COLOR = "#ff5c5c"
 HANDLE_COLOR = "#e6e6e8"
 
 
+def _hex_to_rgb(hex_color):
+    hex_color = hex_color.lstrip("#")
+    return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def render_waveform_image(data, w, h, bg_hex, wave_hex, supersample=3):
+    """Renders a waveform envelope as a supersampled-then-downsampled PIL
+    Image for smooth (anti-aliased) edges, instead of many individual
+    1px canvas lines. Returns a PIL Image in RGB mode, sized (w, h)."""
+    sw, sh = max(1, w * supersample), max(1, h * supersample)
+    mins, maxs = compute_waveform_peaks(data, sw)
+    mid = sh / 2.0
+    amp_scale = (sh / 2.0) * 0.9
+    img = Image.new("RGB", (sw, sh), _hex_to_rgb(bg_hex))
+    draw = ImageDraw.Draw(img)
+    top = mid - maxs * amp_scale
+    bot = mid - mins * amp_scale
+    poly = list(zip(range(sw), top)) + list(zip(range(sw - 1, -1, -1), bot[::-1]))
+    draw.polygon(poly, fill=_hex_to_rgb(wave_hex))
+    return img.resize((w, h), Image.LANCZOS)
+
+
+def _rounded_rect_points(w, h, r):
+    r = min(r, w / 2, h / 2)
+    return [r, 0, w - r, 0, w, 0, w, r, w, h - r, w, h,
+            w - r, h, r, h, 0, h, 0, h - r, 0, r, 0, 0]
+
+
+class RoundedEntry:
+    """A ttk.Entry substitute with actual rounded corners, drawn on a
+    Canvas (Tk/ttk widgets can't do this natively without theme images).
+    Resizes responsively via <Configure>."""
+
+    def __init__(self, parent, textvariable, bg, field_bg, fg, border, height=32, radius=10):
+        import tkinter as tk
+        self.tk = tk
+        self.radius = radius
+        self.field_bg, self.border, self.fg = field_bg, border, fg
+        self.frame = tk.Frame(parent, bg=bg)
+        self.canvas = tk.Canvas(self.frame, height=height, bg=bg, highlightthickness=0)
+        self.canvas.pack(fill="x", expand=True)
+        self.entry = tk.Entry(self.canvas, textvariable=textvariable, bg=field_bg, fg=fg,
+                               insertbackground=fg, relief="flat", highlightthickness=0,
+                               bd=0, font=("Segoe UI", 10))
+        self.canvas.bind("<Configure>", self._redraw)
+
+    def _redraw(self, event=None):
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        if w < 2 or h < 2:
+            return
+        self.canvas.delete("bg")
+        pts = _rounded_rect_points(w, h, self.radius)
+        self.canvas.create_polygon(pts, smooth=True, fill=self.field_bg,
+                                    outline=self.border, tags="bg")
+        self.canvas.tag_lower("bg")
+        self.canvas.delete("entrywin")
+        self.canvas.create_window(self.radius, h / 2, window=self.entry, anchor="w",
+                                   width=max(10, w - 2 * self.radius), tags="entrywin")
+
+    def pack(self, **kw):
+        self.frame.pack(**kw)
+
+
+class RoundedCheckbutton:
+    """A ttk.Checkbutton substitute with a rounded box indicator instead
+    of the theme's square one."""
+
+    def __init__(self, parent, text, variable, bg, fg, field_bg, accent, border,
+                 command=None, box=18, radius=5):
+        import tkinter as tk
+        self.tk = tk
+        self.variable, self.command = variable, command
+        self.box, self.radius = box, radius
+        self.bg, self.fg, self.field_bg, self.accent, self.border = bg, fg, field_bg, accent, border
+
+        self.frame = tk.Frame(parent, bg=bg)
+        self.canvas = tk.Canvas(self.frame, width=box, height=box, bg=bg, highlightthickness=0)
+        self.canvas.pack(side="left")
+        self.label = tk.Label(self.frame, text=text, bg=bg, fg=fg, font=("Segoe UI", 10))
+        self.label.pack(side="left", padx=(6, 0))
+        self.canvas.bind("<Button-1>", self._toggle)
+        self.label.bind("<Button-1>", self._toggle)
+        self._draw()
+
+    def _draw(self):
+        self.canvas.delete("all")
+        w = h = self.box
+        pts = _rounded_rect_points(w, h, self.radius)
+        fill = self.accent if self.variable.get() else self.field_bg
+        self.canvas.create_polygon(pts, smooth=True, fill=fill, outline=self.border)
+        if self.variable.get():
+            self.canvas.create_line(w * 0.22, h * 0.52, w * 0.42, h * 0.72, w * 0.8, h * 0.28,
+                                     fill="#ffffff", width=2, capstyle="round", joinstyle="round")
+
+    def _toggle(self, event=None):
+        self.variable.set(not self.variable.get())
+        self._draw()
+        if self.command:
+            self.command()
+
+    def pack(self, **kw):
+        self.frame.pack(**kw)
+
+
 class LoopCrossfadeGUI:
     HANDLE_HIT_PX = 6
     CLICK_SLOP_PX = 3
@@ -760,10 +889,17 @@ class LoopCrossfadeGUI:
         self.cropped = False
         self.sel_start = 0
         self.sel_end = 0
+        self.zoom_start = 0        # visible window into self.data, in samples
+        self.zoom_end = 0
         self.canvas_width = 700
         self.canvas_height = 160
         self.drag_mode = None      # None | "start" | "end" | "new" | "pending"
         self.drag_anchor_x = None
+        self.pre_drag_selection = None
+        self.undo_stack = []
+        self.redo_stack = []
+        self.preview_mode = False  # True while the player holds a processed preview, not raw audio
+        self._wave_photo = None    # keep a reference so PIL's PhotoImage isn't garbage collected
         self.player = AudioPlayer()
         self.shortcuts = load_shortcuts()
 
@@ -819,18 +955,20 @@ class LoopCrossfadeGUI:
         outer.pack(fill="both", expand=True)
 
         ttk.Label(outer, text="Loop Crossfade", style="Heading.TLabel").pack(anchor="w")
-        ttk.Label(outer, text="Drag & drop a file, select a region, crop, preview, then crossfade.",
+        ttk.Label(outer, text="Drag & drop a file, select a region, audition the loop, then save.",
                   style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
 
-        # file row
+        # file row (rounded entries)
         row = ttk.Frame(outer); row.pack(fill="x", pady=3)
         ttk.Label(row, text="Input", width=7).pack(side="left")
-        ttk.Entry(row, textvariable=self.in_path_var).pack(side="left", fill="x", expand=True, padx=6)
+        in_entry = RoundedEntry(row, self.in_path_var, BG, FIELD_BG, FG, BORDER)
+        in_entry.pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row, text="Browse", command=self.choose_input).pack(side="left")
 
         row = ttk.Frame(outer); row.pack(fill="x", pady=3)
         ttk.Label(row, text="Save as", width=7).pack(side="left")
-        ttk.Entry(row, textvariable=self.out_path_var).pack(side="left", fill="x", expand=True, padx=6)
+        out_entry = RoundedEntry(row, self.out_path_var, BG, FIELD_BG, FG, BORDER)
+        out_entry.pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row, text="Browse", command=self.choose_output).pack(side="left")
 
         # waveform canvas
@@ -843,13 +981,25 @@ class LoopCrossfadeGUI:
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)     # Windows / macOS
+        self.canvas.bind("<Button-4>", self._on_mousewheel)       # Linux scroll up
+        self.canvas.bind("<Button-5>", self._on_mousewheel)       # Linux scroll down
         self._draw_placeholder()
 
-        ttk.Label(outer, text="Click-drag to select a region. Drag the edges to adjust. Click once to move the playhead.",
-                  style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
+        ttk.Label(outer, text="Drag to select, drag edges to adjust, click to move the playhead. Scroll to zoom.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(0, 4))
+
+        # zoom row
+        zoom_row = ttk.Frame(outer); zoom_row.pack(fill="x", pady=(0, 8))
+        ttk.Button(zoom_row, text="Zoom In", command=lambda: self._zoom_step(1)).pack(side="left", padx=(0, 4))
+        ttk.Button(zoom_row, text="Zoom Out", command=lambda: self._zoom_step(-1)).pack(side="left", padx=4)
+        ttk.Button(zoom_row, text="Zoom to Selection", command=self.zoom_to_selection).pack(side="left", padx=4)
+        ttk.Button(zoom_row, text="Zoom to Fit", command=self.zoom_to_fit).pack(side="left", padx=4)
+        ttk.Button(zoom_row, text="\u21b6 Undo", command=self.undo).pack(side="right", padx=4)
+        ttk.Button(zoom_row, text="\u21b7 Redo", command=self.redo).pack(side="right", padx=(4, 0))
 
         # transport
-        transport = ttk.Frame(outer); transport.pack(fill="x", pady=(0, 4))
+        transport = ttk.Frame(outer); transport.pack(fill="x", pady=(4, 4))
         self.btn_rewind = ttk.Button(transport, text="\u23ee Rewind", command=self.on_rewind)
         self.btn_rewind.pack(side="left", padx=(0, 4))
         self.btn_play = ttk.Button(transport, textvariable=self.play_label_var, command=self.on_play_pause)
@@ -858,23 +1008,31 @@ class LoopCrossfadeGUI:
         self.btn_stop.pack(side="left", padx=4)
         self.btn_loop = ttk.Button(transport, text="\U0001f501 Loop", command=self.on_loop_toggle)
         self.btn_loop.pack(side="left", padx=4)
-        ttk.Button(transport, text="Crop to Selection", command=self.on_crop).pack(side="left", padx=(16, 4))
+        ttk.Button(transport, text="\u25b6 Audition Loop", style="Accent.TButton",
+                   command=self.on_audition).pack(side="left", padx=(16, 4))
+        ttk.Button(transport, text="Crop to Selection", command=self.on_crop).pack(side="left", padx=4)
         ttk.Button(transport, text="Keyboard Shortcuts...", command=self.open_shortcuts_dialog).pack(side="right")
+
+        ttk.Label(outer, text="Audition previews the current selection's crossfade without saving or cropping. "
+                               "Crop is only needed once you want to commit the working range.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
 
         ttk.Frame(outer, height=1, style="Panel.TFrame").pack(fill="x", pady=14)
 
-        # processing options
+        # processing options (rounded checkboxes)
         row = ttk.Frame(outer); row.pack(fill="x", pady=4)
-        ttk.Checkbutton(row, text="Snap loop points to transients (beat / articulation alignment)",
-                         variable=self.snap_var, command=self._toggle_window_entry).pack(side="left")
+        RoundedCheckbutton(row, "Snap loop points to transients (beat / articulation alignment)",
+                            self.snap_var, BG, FG, FIELD_BG, ACCENT, BORDER,
+                            command=self._toggle_window_entry).pack(side="left")
         row = ttk.Frame(outer); row.pack(fill="x", pady=(0, 10))
         ttk.Label(row, text="Search window (s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
         self.window_entry = ttk.Entry(row, textvariable=self.window_var, width=8, state="disabled")
         self.window_entry.pack(side="left")
 
         row = ttk.Frame(outer); row.pack(fill="x", pady=4)
-        ttk.Checkbutton(row, text="Auto-detect crossfade length", variable=self.auto_xfade_var,
-                         command=self._toggle_xfade_entry).pack(side="left")
+        RoundedCheckbutton(row, "Auto-detect crossfade length", self.auto_xfade_var,
+                            BG, FG, FIELD_BG, ACCENT, BORDER,
+                            command=self._toggle_xfade_entry).pack(side="left")
         row = ttk.Frame(outer); row.pack(fill="x", pady=(0, 4))
         ttk.Label(row, text="Manual crossfade (s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
         self.xfade_entry = ttk.Entry(row, textvariable=self.xfade_var, width=8, state="normal")
@@ -900,6 +1058,8 @@ class LoopCrossfadeGUI:
             notes.append("sounddevice not installed -- playback controls are disabled (pip install sounddevice).")
         if not DND_AVAILABLE:
             notes.append("tkinterdnd2 not installed -- drag & drop is disabled, use Browse instead (pip install tkinterdnd2).")
+        if not PIL_AVAILABLE:
+            notes.append("Pillow not installed -- waveform draws with plain lines instead of smoothed fill (pip install Pillow).")
         if notes:
             ttk.Label(outer, text=" / ".join(notes), style="Muted.TLabel",
                       foreground="#e2a33d", wraplength=700, justify="left").pack(anchor="w", pady=(8, 0))
@@ -957,6 +1117,10 @@ class LoopCrossfadeGUI:
         self.loaded_path = path
         self.cropped = False
         self.sel_start, self.sel_end = 0, len(data)
+        self.zoom_start, self.zoom_end = 0, len(data)
+        self.preview_mode = False
+        self.undo_stack.clear()
+        self.redo_stack.clear()
         self.player.load(data, sr)
 
         self.in_path_var.set(path)
@@ -966,7 +1130,41 @@ class LoopCrossfadeGUI:
 
         self._redraw_waveform()
         dur = len(data) / sr
-        self.status_var.set(f"Loaded {os.path.basename(path)} ({dur:.2f}s). Select a region, then Crop, then Process & Save.")
+        self.status_var.set(f"Loaded {os.path.basename(path)} ({dur:.2f}s). Select a region, Audition to preview the loop, then Process & Save.")
+
+    # ---------------- undo / redo ----------------
+
+    def _snapshot(self):
+        return {"data": self.data, "sel_start": self.sel_start, "sel_end": self.sel_end,
+                "cropped": self.cropped, "zoom_start": self.zoom_start, "zoom_end": self.zoom_end}
+
+    def _restore(self, snap):
+        self.data = snap["data"]
+        self.sel_start, self.sel_end = snap["sel_start"], snap["sel_end"]
+        self.cropped = snap["cropped"]
+        self.zoom_start, self.zoom_end = snap["zoom_start"], snap["zoom_end"]
+        self.preview_mode = False
+        self.player.load(self.data, self.sr)
+        self.player.set_selection(self.sel_start, self.sel_end)
+        self._redraw_waveform()
+
+    def push_undo(self):
+        self.undo_stack.append(self._snapshot())
+        self.redo_stack.clear()
+
+    def undo(self):
+        if not self.undo_stack or self.data is None:
+            return
+        self.redo_stack.append(self._snapshot())
+        self._restore(self.undo_stack.pop())
+        self.status_var.set("Undid last change.")
+
+    def redo(self):
+        if not self.redo_stack or self.data is None:
+            return
+        self.undo_stack.append(self._snapshot())
+        self._restore(self.redo_stack.pop())
+        self.status_var.set("Redid change.")
 
     # ---------------- waveform canvas ----------------
 
@@ -984,6 +1182,11 @@ class LoopCrossfadeGUI:
         else:
             self._draw_placeholder()
 
+    def _visible_range(self):
+        if self.data is None:
+            return 0, 0
+        return self.zoom_start, self.zoom_end
+
     def _redraw_waveform(self):
         if self.data is None:
             self._draw_placeholder()
@@ -991,45 +1194,55 @@ class LoopCrossfadeGUI:
         self.canvas.delete("all")
         w = max(1, self.canvas.winfo_width() or self.canvas_width)
         h = max(1, self.canvas.winfo_height() or self.canvas_height)
-        mins, maxs = compute_waveform_peaks(self.data, w)
-        mid = h / 2
-        scale = (h / 2) * 0.9
-        for x in range(len(maxs)):
-            y1 = mid - maxs[x] * scale
-            y2 = mid - mins[x] * scale
-            self.canvas.create_line(x, y1, x, y2, fill=WAVEFORM_COLOR)
+        vs, ve = self._visible_range()
+        segment = self.data[vs:ve] if ve > vs else self.data[0:1]
 
-        n = len(self.data)
-        sx = self._sample_to_x(self.sel_start, w, n)
-        ex = self._sample_to_x(self.sel_end, w, n)
+        if PIL_AVAILABLE:
+            img = render_waveform_image(segment, w, h, PANEL, WAVEFORM_COLOR)
+            self._wave_photo = ImageTk.PhotoImage(img)  # keep a reference, or Tk garbage-collects it
+            self.canvas.create_image(0, 0, anchor="nw", image=self._wave_photo)
+        else:
+            mins, maxs = compute_waveform_peaks(segment, w)
+            mid = h / 2
+            scale = (h / 2) * 0.9
+            for x in range(len(maxs)):
+                y1 = mid - maxs[x] * scale
+                y2 = mid - mins[x] * scale
+                self.canvas.create_line(x, y1, x, y2, fill=WAVEFORM_COLOR)
+
+        sx = self._sample_to_x(self.sel_start, w)
+        ex = self._sample_to_x(self.sel_end, w)
         self.canvas.create_rectangle(sx, 0, ex, h, fill=SELECTION_COLOR, outline="", stipple="gray50")
         self.canvas.create_line(sx, 0, sx, h, fill=HANDLE_COLOR, width=2, tags="handle_start")
         self.canvas.create_line(ex, 0, ex, h, fill=HANDLE_COLOR, width=2, tags="handle_end")
 
         cursor = self.player.get_cursor()
-        cx = self._sample_to_x(cursor, w, n)
+        cx = self._sample_to_x(cursor, w)
         self.canvas.create_line(cx, 0, cx, h, fill=PLAYHEAD_COLOR, width=1, tags="playhead")
 
-    def _sample_to_x(self, sample, width=None, n=None):
+    def _sample_to_x(self, sample, width=None):
         width = width or self.canvas.winfo_width() or self.canvas_width
-        n = n or (len(self.data) if self.data is not None else 1)
-        return 0 if n == 0 else (sample / n) * width
+        vs, ve = self._visible_range()
+        span = max(1, ve - vs)
+        x = ((sample - vs) / span) * width
+        return max(-10, min(width + 10, x))  # allow slightly off-canvas so edge handles are still visible
 
-    def _x_to_sample(self, x, width=None, n=None):
+    def _x_to_sample(self, x, width=None):
         width = width or self.canvas.winfo_width() or self.canvas_width
-        n = n or (len(self.data) if self.data is not None else 0)
-        if width == 0:
-            return 0
+        vs, ve = self._visible_range()
+        span = ve - vs
+        if width == 0 or span <= 0:
+            return vs
         frac = max(0.0, min(1.0, x / width))
-        return int(frac * n)
+        return int(vs + frac * span)
 
     def _on_canvas_press(self, event):
         if self.data is None:
             return
         w = self.canvas.winfo_width()
-        n = len(self.data)
-        sx = self._sample_to_x(self.sel_start, w, n)
-        ex = self._sample_to_x(self.sel_end, w, n)
+        sx = self._sample_to_x(self.sel_start, w)
+        ex = self._sample_to_x(self.sel_end, w)
+        self.pre_drag_selection = (self.sel_start, self.sel_end)
         if abs(event.x - sx) <= self.HANDLE_HIT_PX:
             self.drag_mode = "start"
         elif abs(event.x - ex) <= self.HANDLE_HIT_PX:
@@ -1042,13 +1255,12 @@ class LoopCrossfadeGUI:
         if self.data is None or self.drag_mode is None:
             return
         w = self.canvas.winfo_width()
-        n = len(self.data)
         x = max(0, min(w, event.x))
-        samp = self._x_to_sample(x, w, n)
+        samp = self._x_to_sample(x, w)
 
         if self.drag_mode == "pending" and abs(event.x - self.drag_anchor_x) > self.CLICK_SLOP_PX:
             self.drag_mode = "new"
-            self.sel_start = self._x_to_sample(self.drag_anchor_x, w, n)
+            self.sel_start = self._x_to_sample(self.drag_anchor_x, w)
             self.sel_end = self.sel_start
 
         if self.drag_mode == "start":
@@ -1056,7 +1268,7 @@ class LoopCrossfadeGUI:
         elif self.drag_mode == "end":
             self.sel_end = max(samp, self.sel_start)
         elif self.drag_mode == "new":
-            anchor_samp = self._x_to_sample(self.drag_anchor_x, w, n)
+            anchor_samp = self._x_to_sample(self.drag_anchor_x, w)
             self.sel_start, self.sel_end = min(anchor_samp, samp), max(anchor_samp, samp)
 
         if self.drag_mode in ("start", "end", "new"):
@@ -1069,17 +1281,93 @@ class LoopCrossfadeGUI:
         if self.drag_mode == "pending":
             # a plain click (no meaningful drag): move the playhead there
             w = self.canvas.winfo_width()
-            n = len(self.data)
-            samp = self._x_to_sample(event.x, w, n)
+            samp = self._x_to_sample(event.x, w)
             self.player.rewind()  # ensure stopped state doesn't fight the seek
             with self.player.lock:
                 self.player.cursor = max(self.sel_start, min(samp, self.sel_end))
             self._redraw_waveform()
+        elif self.drag_mode in ("start", "end", "new") and self.pre_drag_selection is not None:
+            if (self.sel_start, self.sel_end) != self.pre_drag_selection:
+                # push the PRE-drag selection so undo restores exactly where the drag began
+                old_start, old_end = self.pre_drag_selection
+                self.undo_stack.append({
+                    "data": self.data, "sel_start": old_start, "sel_end": old_end,
+                    "cropped": self.cropped, "zoom_start": self.zoom_start, "zoom_end": self.zoom_end,
+                })
+                self.redo_stack.clear()
+                if self.preview_mode:
+                    self._exit_preview_mode()
         self.drag_mode = None
+        self.pre_drag_selection = None
         if self.sel_end > self.sel_start:
             self.player.set_selection(self.sel_start, self.sel_end)
 
+    # ---------------- zoom ----------------
+
+    MIN_ZOOM_SAMPLES = 256
+
+    def _zoom_step(self, direction, center_x=None):
+        if self.data is None:
+            return
+        w = self.canvas.winfo_width() or self.canvas_width
+        center_x = w / 2 if center_x is None else center_x
+        self._zoom_at(center_x, w, direction)
+        self._redraw_waveform()
+
+    def _zoom_at(self, x_pixel, w, direction):
+        n = len(self.data)
+        vs, ve = self.zoom_start, self.zoom_end
+        span = ve - vs
+        factor = 0.8 if direction > 0 else 1.25
+        new_span = max(self.MIN_ZOOM_SAMPLES, min(n, int(span * factor)))
+        if new_span >= n:
+            self.zoom_start, self.zoom_end = 0, n
+            return
+        center_samp = vs + (x_pixel / w) * span
+        left_frac = x_pixel / w
+        new_vs = int(center_samp - left_frac * new_span)
+        new_ve = new_vs + new_span
+        if new_vs < 0:
+            new_ve -= new_vs; new_vs = 0
+        if new_ve > n:
+            shift = new_ve - n
+            new_vs = max(0, new_vs - shift); new_ve = n
+        self.zoom_start, self.zoom_end = new_vs, new_ve
+
+    def _on_mousewheel(self, event):
+        if self.data is None:
+            return
+        direction = 1 if (getattr(event, "delta", 0) > 0 or getattr(event, "num", None) == 4) else -1
+        w = self.canvas.winfo_width() or self.canvas_width
+        self._zoom_at(event.x, w, direction)
+        self._redraw_waveform()
+
+    def zoom_to_fit(self):
+        if self.data is None:
+            return
+        self.zoom_start, self.zoom_end = 0, len(self.data)
+        self._redraw_waveform()
+
+    def zoom_to_selection(self):
+        if self.data is None or self.sel_end <= self.sel_start:
+            return
+        span = self.sel_end - self.sel_start
+        pad = max(1, int(span * 0.1))
+        self.zoom_start = max(0, self.sel_start - pad)
+        self.zoom_end = min(len(self.data), self.sel_end + pad)
+        self._redraw_waveform()
+
     # ---------------- transport ----------------
+
+    def _exit_preview_mode(self):
+        """Swap the player back to raw (un-processed) audio -- used whenever
+        something invalidates a processed preview that's currently loaded."""
+        if not self.preview_mode:
+            return
+        self.player.stop()
+        self.player.load(self.data, self.sr)
+        self.player.set_selection(self.sel_start, self.sel_end)
+        self.preview_mode = False
 
     def on_play_pause(self):
         if self.data is None:
@@ -1087,6 +1375,7 @@ class LoopCrossfadeGUI:
         if not SOUNDDEVICE_AVAILABLE:
             self.messagebox.showinfo("Loop Crossfade", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
             return
+        self._exit_preview_mode()  # plain Play always plays raw source audio
         if self.player.playing:
             self.player.pause()
             self.play_label_var.set("Play")
@@ -1110,6 +1399,70 @@ class LoopCrossfadeGUI:
         self.player.set_loop(self.loop_var.get())
         self.btn_loop.configure(style="ToggleOn.TButton" if self.loop_var.get() else "Toggle.TButton")
 
+    def _read_process_params(self):
+        """Validates and returns (xfade_seconds_or_None, curve, snap, window)
+        from the current UI fields, or None if invalid (and shows an error)."""
+        xfade_seconds = None
+        if not self.auto_xfade_var.get():
+            try:
+                xfade_seconds = float(self.xfade_var.get())
+                if xfade_seconds <= 0:
+                    raise ValueError
+            except ValueError:
+                self.messagebox.showerror("Loop Crossfade", "Crossfade duration must be a positive number of seconds.")
+                return None
+        try:
+            transient_window = float(self.window_var.get()) if self.snap_var.get() else 0.25
+        except ValueError:
+            self.messagebox.showerror("Loop Crossfade", "Transient search window must be a number of seconds.")
+            return None
+        curve = "equal_power" if self.curve_var.get() == "Equal power" else "linear"
+        return xfade_seconds, curve, self.snap_var.get(), transient_window
+
+    def on_audition(self):
+        """Processes the CURRENT selection (crop not required) and plays it
+        looped, without touching self.data or writing any file -- so you can
+        hear whether the crossfade settings are right before committing."""
+        if self.data is None:
+            return
+        if not SOUNDDEVICE_AVAILABLE:
+            self.messagebox.showinfo("Loop Crossfade", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
+            return
+        if self.sel_end <= self.sel_start:
+            self.messagebox.showerror("Loop Crossfade", "Select a region on the waveform first.")
+            return
+        params = self._read_process_params()
+        if params is None:
+            return
+        xfade_seconds, curve, snap, window = params
+
+        try:
+            self.status_var.set("Auditioning...")
+            self.root.update_idletasks()
+            segment = self.data[self.sel_start:self.sel_end]
+            t0 = time.time()
+            preview, used_xfade, st, et = _run_pipeline(
+                segment, self.sr, xfade_seconds, curve, snap, window, self.auto_xfade_var.get())
+            elapsed = time.time() - t0
+
+            self.player.stop()
+            self.player.load(preview, self.sr)
+            self.preview_mode = True
+            self.loop_var.set(True)
+            self.player.set_loop(True)
+            self.btn_loop.configure(style="ToggleOn.TButton")
+            self.player.play()
+            self.play_label_var.set("Pause")
+
+            dur = preview.shape[0] / self.sr
+            self.status_var.set(
+                f"Auditioning {dur:.2f}s loop (crossfade {used_xfade*1000:.0f} ms, computed in {elapsed*1000:.0f} ms). "
+                f"Adjust settings and press Audition again, or Process & Save when it sounds right."
+            )
+        except Exception as e:
+            self.status_var.set("Audition failed.")
+            self.messagebox.showerror("Loop Crossfade", str(e))
+
     def on_crop(self):
         if self.data is None:
             return
@@ -1117,14 +1470,17 @@ class LoopCrossfadeGUI:
         if e <= s:
             self.messagebox.showerror("Loop Crossfade", "Select a region on the waveform first.")
             return
+        self.push_undo()
         self.player.stop()
         self.data = self.data[s:e]
         self.sel_start, self.sel_end = 0, len(self.data)
+        self.zoom_start, self.zoom_end = 0, len(self.data)
         self.cropped = True
+        self.preview_mode = False
         self.player.load(self.data, self.sr)
         self._redraw_waveform()
         dur = len(self.data) / self.sr
-        self.status_var.set(f"Cropped to {dur:.2f}s. This section will be used for the loop.")
+        self.status_var.set(f"Cropped to {dur:.2f}s. (Cmd/Ctrl+Z to undo.)")
 
     def _poll_playhead(self):
         if self.data is not None and self.player.playing:
@@ -1135,53 +1491,78 @@ class LoopCrossfadeGUI:
 
     # ---------------- keyboard shortcuts ----------------
 
-    def _bind_shortcuts(self):
-        actions = {
+    def _action_map(self):
+        return {
             "play_pause": self.on_play_pause,
             "stop": self.on_stop,
             "rewind": self.on_rewind,
             "loop_toggle": self.on_loop_toggle,
             "crop": self.on_crop,
+            "audition": self.on_audition,
+            "undo": self.undo,
+            "redo": self.redo,
+            "zoom_in": lambda: self._zoom_step(1),
+            "zoom_out": lambda: self._zoom_step(-1),
+            "zoom_fit": self.zoom_to_fit,
         }
-        for name, fn in actions.items():
+
+    def _bind_shortcuts(self):
+        for name, fn in self._action_map().items():
             self._bind_one(self.shortcuts.get(name, DEFAULT_SHORTCUTS[name]), fn)
 
     def _bind_one(self, key, fn):
         seq = f"<{key}>" if len(key) > 1 else f"<KeyPress-{key}>"
-        self.root.bind(seq, lambda e: fn())
+        try:
+            self.root.bind(seq, lambda e: fn())
+        except self.tk.TclError:
+            pass  # an invalid/unsupported key sequence shouldn't crash the app
 
     def _rebind_all(self):
-        actions = {
-            "play_pause": self.on_play_pause,
-            "stop": self.on_stop,
-            "rewind": self.on_rewind,
-            "loop_toggle": self.on_loop_toggle,
-            "crop": self.on_crop,
-        }
-        for name, fn in actions.items():
+        for name, fn in self._action_map().items():
             key = self.shortcuts.get(name, DEFAULT_SHORTCUTS[name])
             self._bind_one(key, fn)
+
+    @staticmethod
+    def _event_to_key_string(event):
+        """Builds a Tkinter-bindable key string (e.g. 'Control-z') from a
+        KeyPress event, including modifiers -- needed so remapping Undo/
+        Redo to Ctrl+<key> combos actually works, not just the bare key."""
+        parts = []
+        state = event.state
+        if state & 0x0004:
+            parts.append("Control")
+        if state & 0x0001:
+            parts.append("Shift")
+        if state & 0x0008 or state & 0x20000:
+            parts.append("Alt")
+        keysym = event.keysym
+        if keysym in ("Control_L", "Control_R", "Shift_L", "Shift_R", "Alt_L", "Alt_R"):
+            return None  # a bare modifier key press isn't a usable shortcut on its own
+        parts.append(keysym)
+        return "-".join(parts)
 
     def open_shortcuts_dialog(self):
         tk, ttk = self.tk, self.ttk
         dlg = tk.Toplevel(self.root)
         dlg.title("Keyboard Shortcuts")
         dlg.configure(bg=BG)
-        dlg.geometry("360x260")
+        dlg.geometry("380x420")
         dlg.transient(self.root)
 
         rows = {}
         for i, (name, label) in enumerate(SHORTCUT_LABELS.items()):
-            ttk.Label(dlg, text=label, background=BG, foreground=FG).grid(row=i, column=0, sticky="w", padx=10, pady=8)
-            btn = ttk.Button(dlg, text=self.shortcuts.get(name, DEFAULT_SHORTCUTS[name]), width=12)
-            btn.grid(row=i, column=1, padx=10, pady=8)
+            ttk.Label(dlg, text=label, background=BG, foreground=FG).grid(row=i, column=0, sticky="w", padx=10, pady=6)
+            btn = ttk.Button(dlg, text=self.shortcuts.get(name, DEFAULT_SHORTCUTS[name]), width=14)
+            btn.grid(row=i, column=1, padx=10, pady=6)
             rows[name] = btn
 
         def start_listening(name, btn):
             btn.configure(text="Press a key...")
 
             def capture(event):
-                key = event.keysym
+                key = self._event_to_key_string(event)
+                if key is None:
+                    return  # ignore bare modifier presses, keep listening
                 self.shortcuts[name] = key
                 btn.configure(text=key)
                 dlg.unbind("<KeyPress>")
@@ -1210,38 +1591,32 @@ class LoopCrossfadeGUI:
         if not out_path:
             self.messagebox.showerror("Loop Crossfade", "Choose a Save As location first.")
             return
-
-        xfade_seconds = None
-        if not self.auto_xfade_var.get():
-            try:
-                xfade_seconds = float(self.xfade_var.get())
-                if xfade_seconds <= 0:
-                    raise ValueError
-            except ValueError:
-                self.messagebox.showerror("Loop Crossfade", "Crossfade duration must be a positive number of seconds.")
-                return
-
-        try:
-            transient_window = float(self.window_var.get()) if self.snap_var.get() else 0.25
-        except ValueError:
-            self.messagebox.showerror("Loop Crossfade", "Transient search window must be a number of seconds.")
+        if self.sel_end <= self.sel_start:
+            self.messagebox.showerror("Loop Crossfade", "Select a region on the waveform first.")
             return
 
-        curve = "equal_power" if self.curve_var.get() == "Equal power" else "linear"
+        params = self._read_process_params()
+        if params is None:
+            return
+        xfade_seconds, curve, snap, window = params
 
         try:
             self.status_var.set("Processing...")
             self.root.update_idletasks()
+            t0 = time.time()
+            # operates on the current SELECTION, not necessarily the full
+            # buffer -- Crop is optional; this is what makes "process and
+            # save straight from a selection" work without cropping first
+            segment = self.data[self.sel_start:self.sel_end]
             result, used_xfade, start_trim, end_trim = _run_pipeline(
-                self.data, self.sr, xfade_seconds, curve,
-                self.snap_var.get(), transient_window, self.auto_xfade_var.get(),
+                segment, self.sr, xfade_seconds, curve, snap, window, self.auto_xfade_var.get(),
             )
             encode_from_pcm(result, self.sr, self.sampwidth, out_path)
+            elapsed = time.time() - t0
             duration = result.shape[0] / self.sr
-            msg = (f"Done -- {duration:.2f}s loop saved to:\n{out_path}\n"
-                   f"Crossfade used: {used_xfade * 1000:.0f} ms"
-                   f"{' (from cropped selection)' if self.cropped else ''}")
-            if self.snap_var.get():
+            msg = (f"Done in {elapsed:.2f}s -- {duration:.2f}s loop saved to:\n{out_path}\n"
+                   f"Crossfade used: {used_xfade * 1000:.0f} ms")
+            if snap:
                 msg += (f"\nTrimmed to transients: {start_trim / self.sr * 1000:.0f} ms from start, "
                         f"{end_trim / self.sr * 1000:.0f} ms from end")
             self.status_var.set(msg)
