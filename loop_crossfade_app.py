@@ -873,6 +873,8 @@ FG = "#e6e6e8"
 MUTED = "#9a9da3"
 ACCENT = "#4f8cff"
 ACCENT_HOVER = "#6da0ff"
+AUDITION_ON = "#2ecc82"       # distinct green while actively auditioning -- so it doesn't
+AUDITION_ON_HOVER = "#4fdb9c"  # read the same as the (blue) Loop toggle or default accent buttons
 BORDER = "#37393e"
 WAVEFORM_COLOR = "#5b8cff"
 SELECTION_COLOR = "#3a4a6b"
@@ -893,11 +895,16 @@ def format_time(seconds):
     return f"{m:02d}:{s:06.3f}"
 
 
-def pick_tick_interval(span_sec, target_ticks=8):
+def pick_tick_interval(span_sec, canvas_width_px=None, min_label_spacing_px=70, target_ticks=8):
     """Chooses a 'nice' timeline tick spacing (in seconds) for a given
-    visible time span, aiming for roughly target_ticks marks."""
+    visible time span. If canvas_width_px is given, the target tick count
+    scales with available space (roughly one label per min_label_spacing_px)
+    instead of a fixed count -- so a wide window shows proportionally more
+    labeled ticks rather than the same handful stretched across it."""
     candidates = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
                   1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+    if canvas_width_px:
+        target_ticks = max(3, int(canvas_width_px / min_label_spacing_px))
     raw = span_sec / target_ticks
     for c in candidates:
         if c >= raw:
@@ -983,7 +990,9 @@ class RoundedEntry:
         self.canvas.pack(fill="x" if width is None else None, expand=(width is None))
         self.entry = tk.Entry(self.canvas, textvariable=textvariable, bg=field_bg, fg=fg,
                                insertbackground=fg, relief="flat", highlightthickness=0,
-                               bd=0, font=("Segoe UI", 10))
+                               bd=0, font=("Segoe UI", 10),
+                               disabledbackground=field_bg, disabledforeground=MUTED,
+                               readonlybackground=field_bg)
         self._bg_photo = None
         self.canvas.bind("<Configure>", self._redraw)
         if width is not None:
@@ -1155,6 +1164,9 @@ class LoopCrossfadeGUI:
         style.map("Accent.TButton", background=[("active", ACCENT_HOVER)])
         style.configure("Toggle.TButton", background=PANEL, foreground=FG, borderwidth=0, padding=8)
         style.configure("ToggleOn.TButton", background=ACCENT, foreground="#ffffff", borderwidth=0, padding=8)
+        style.configure("AuditionOn.TButton", background=AUDITION_ON, foreground="#ffffff",
+                         borderwidth=0, padding=10, font=("Segoe UI", 11, "bold"))
+        style.map("AuditionOn.TButton", background=[("active", AUDITION_ON_HOVER)])
 
     # ---------------- widget layout ----------------
 
@@ -1227,8 +1239,10 @@ class LoopCrossfadeGUI:
         self.btn_stop.pack(side="left", padx=4)
         self.btn_loop = ttk.Button(transport, text="\U0001f501 Loop", command=self.on_loop_toggle)
         self.btn_loop.pack(side="left", padx=4)
-        ttk.Button(transport, text="\u25b6 Audition Loop", style="Accent.TButton",
-                   command=self.on_audition).pack(side="left", padx=(16, 4))
+        self.audition_label_var = tk.StringVar(value="\u25b6 Audition Loop")
+        self.btn_audition = ttk.Button(transport, textvariable=self.audition_label_var,
+                                        style="Accent.TButton", command=self.on_audition)
+        self.btn_audition.pack(side="left", padx=(16, 4))
         ttk.Button(transport, text="Crop to Selection", command=self.on_crop).pack(side="left", padx=4)
         ttk.Button(transport, text="Stretch...", command=self.open_stretch_dialog).pack(side="left", padx=4)
         ttk.Button(transport, text="Keyboard Shortcuts...", command=self.open_shortcuts_dialog).pack(side="right")
@@ -1342,6 +1356,7 @@ class LoopCrossfadeGUI:
         self.sel_start, self.sel_end = 0, len(data)
         self.zoom_start, self.zoom_end = 0, len(data)
         self.preview_mode = False
+        self._update_audition_button_style()
         self.undo_stack.clear()
         self.redo_stack.clear()
         self.player.load(data, sr)
@@ -1369,6 +1384,7 @@ class LoopCrossfadeGUI:
         self.cropped = snap["cropped"]
         self.zoom_start, self.zoom_end = snap["zoom_start"], snap["zoom_end"]
         self.preview_mode = False
+        self._update_audition_button_style()
         self.player.load(self.data, self.sr)
         self.player.set_selection(self.sel_start, self.sel_end)
         self._redraw()
@@ -1441,7 +1457,7 @@ class LoopCrossfadeGUI:
         h = max(1, self.timeline_canvas.winfo_height() or 22)
         vs, ve = self._visible_range()
         span_sec = max(1e-6, (ve - vs) / self.sr)
-        interval = pick_tick_interval(span_sec)
+        interval = pick_tick_interval(span_sec, canvas_width_px=w)
         minor_interval = interval / 5.0
 
         # minor (unlabeled) ticks first so major ticks draw on top of them
@@ -1588,19 +1604,39 @@ class LoopCrossfadeGUI:
             self._update_selection_duration_label()
             self._redraw()
 
+    def _raw_to_preview_cursor(self, raw_sample):
+        """Inverse of _display_cursor_sample: maps a click position in
+        self.data-space into the current preview buffer's own sample
+        space. Only meaningful while self.preview_mode is True."""
+        if self.player.data is None:
+            return 0
+        span = max(1, self.sel_end - self.sel_start)
+        frac = (raw_sample - self.sel_start) / span
+        frac = max(0.0, min(1.0, frac))
+        total = self.player.data.shape[0]
+        return int(frac * total)
+
     def _on_canvas_release(self, event):
         if self.data is None:
             self.drag_mode = None
             return
         if self.drag_mode == "pending":
-            # a plain click (no meaningful drag): move the playhead there --
-            # anywhere in the file, not clamped to the marked selection, so
-            # you can scrub/play outside the loop region to check context
+            # a plain click (no meaningful drag): move the playhead there
             w = self.canvas.winfo_width()
             samp = self._x_to_sample(event.x, w)
             samp = max(0, min(samp, len(self.data)))
-            self._exit_preview_mode()  # a raw click always targets self.data, not a processed preview buffer
-            self.player.set_cursor(samp)
+            if self.preview_mode and self.sel_start <= samp < self.sel_end:
+                # clicking WITHIN the loop region while auditioning: stay in
+                # preview mode (don't fall back to raw/unprocessed audio) --
+                # this is what lets you scrub right up to the loop-back
+                # point and hear the actual crossfaded wrap
+                preview_cursor = self._raw_to_preview_cursor(samp)
+                self.player.set_cursor(preview_cursor)
+            else:
+                # clicking outside the loop region: always operate on raw
+                # audio, so you can freely check surrounding context
+                self._exit_preview_mode()
+                self.player.set_cursor(samp)
             self._show_click_flag(event.x, samp)
             self._redraw()
         elif self.drag_mode in ("start", "end", "new") and self.pre_drag_selection is not None:
@@ -1701,6 +1737,14 @@ class LoopCrossfadeGUI:
 
     # ---------------- transport ----------------
 
+    def _update_audition_button_style(self):
+        if self.preview_mode:
+            self.btn_audition.configure(style="AuditionOn.TButton")
+            self.audition_label_var.set("\u25a0 Auditioning (click to stop)")
+        else:
+            self.btn_audition.configure(style="Accent.TButton")
+            self.audition_label_var.set("\u25b6 Audition Loop")
+
     def _exit_preview_mode(self):
         """Swap the player back to raw (un-processed) audio -- used whenever
         something invalidates a processed preview that's currently loaded."""
@@ -1710,6 +1754,7 @@ class LoopCrossfadeGUI:
         self.player.load(self.data, self.sr)
         self.player.set_selection(self.sel_start, self.sel_end)
         self.preview_mode = False
+        self._update_audition_button_style()
 
     def on_play_pause(self):
         if self.data is None:
@@ -1777,14 +1822,26 @@ class LoopCrossfadeGUI:
         self._live_update_after_id = self.root.after(250, lambda: self.on_audition(silent=True))
 
     def on_audition(self, silent=False):
-        """Processes the CURRENT selection (crop not required) and plays it
-        looped, without touching self.data or writing any file -- so you can
-        hear whether the crossfade settings are right before committing.
+        """Toggle: a direct (non-silent) press while already auditioning
+        turns it OFF and returns to raw audio. Otherwise processes the
+        CURRENT selection (crop not required) and plays it looped, without
+        touching self.data or writing any file -- so you can hear whether
+        the crossfade settings are right before committing.
         `silent=True` is used for automatic live re-audition (selection or
-        parameter changes while already auditioning) -- it skips dialogs and
-        quietly does nothing if the current state isn't ready to process."""
+        parameter changes while already auditioning) -- it never toggles
+        off, skips dialogs, and quietly does nothing if the current state
+        isn't ready to process."""
         if self.data is None:
             return
+
+        if self.preview_mode and not silent:
+            self._exit_preview_mode()
+            self.player.stop()
+            self.play_label_var.set("Play")
+            self.status_var.set("Stopped auditioning.")
+            self._redraw()
+            return
+
         if not SOUNDDEVICE_AVAILABLE:
             if not silent:
                 self.messagebox.showinfo("Loop Crossfade", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
@@ -1810,6 +1867,7 @@ class LoopCrossfadeGUI:
             self.player.stop()
             self.player.load(preview, self.sr)
             self.preview_mode = True
+            self._update_audition_button_style()
             self.loop_var.set(True)
             self.player.set_loop(True)
             self.btn_loop.configure(style="ToggleOn.TButton")
@@ -1819,7 +1877,8 @@ class LoopCrossfadeGUI:
             dur = preview.shape[0] / self.sr
             self.status_var.set(
                 f"Auditioning {dur:.2f}s loop (crossfade {used_xfade*1000:.0f} ms, computed in {elapsed*1000:.0f} ms). "
-                f"Adjust settings and press Audition again, or Process & Save when it sounds right."
+                f"Click within the selection to scrub the loop, adjust settings to update live, "
+                f"or click Audition Loop again to stop."
             )
         except Exception as e:
             self.status_var.set("Audition failed.")
@@ -1840,6 +1899,7 @@ class LoopCrossfadeGUI:
         self.zoom_start, self.zoom_end = 0, len(self.data)
         self.cropped = True
         self.preview_mode = False
+        self._update_audition_button_style()
         self.player.load(self.data, self.sr)
         self._redraw()
         self._update_selection_duration_label()
@@ -1853,12 +1913,21 @@ class LoopCrossfadeGUI:
             self.messagebox.showerror("Loop Crossfade", "Select a region on the waveform first.")
             return
 
+        # stop any active playback/audition before editing audio underneath
+        # it -- avoids the transport controls (and the button that started
+        # this) ending up in a stale state once the dialog closes
+        self._exit_preview_mode()
+        self.player.stop()
+        self.play_label_var.set("Play")
+        self._redraw()
+
         tk, ttk = self.tk, self.ttk
         dlg = tk.Toplevel(self.root)
         dlg.title("PaulXStretch")
         dlg.configure(bg=BG)
         dlg.geometry("380x220")
         dlg.transient(self.root)
+        dlg.grab_set()  # modal: prevents interacting with transport controls while this is open
 
         sel_dur = (self.sel_end - self.sel_start) / self.sr
         ttk.Label(dlg, text=f"Stretching {format_time(sel_dur)} of selected audio.",
@@ -1915,6 +1984,9 @@ class LoopCrossfadeGUI:
                 self.sel_end = s + stretched.shape[0]
                 self.zoom_start, self.zoom_end = 0, len(self.data)
                 self.preview_mode = False
+                self._update_audition_button_style()
+                self.play_label_var.set("Play")
+                self.time_var.set("00:00.000")
                 self.player.load(self.data, self.sr)
                 self._redraw()
                 self._update_selection_duration_label()
