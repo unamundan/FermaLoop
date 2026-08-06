@@ -22,7 +22,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python dependencies
-        run: pip install numpy pyinstaller sounddevice tkinterdnd2
+        run: pip install numpy pyinstaller sounddevice tkinterdnd2 Pillow
 
       - name: Download static ffmpeg (Windows build)
         shell: pwsh
@@ -55,7 +55,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python dependencies
-        run: pip install numpy pyinstaller sounddevice tkinterdnd2
+        run: pip install numpy pyinstaller sounddevice tkinterdnd2 Pillow
 
       - name: Download static ffmpeg (macOS build)
         run: |
