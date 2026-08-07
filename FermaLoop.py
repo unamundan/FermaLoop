@@ -3165,6 +3165,25 @@ class LoopCrossfadeGUI:
         return "-".join(parts)
 
     def open_shortcuts_dialog(self):
+        # unconditional, first-line diagnostic: appends every single call
+        # (regardless of what happens next) to two locations, so we can
+        # tell definitively whether this function is even being entered,
+        # and whether the singleton check below is returning early before
+        # ever reaching the newer positioning/debug code further down
+        import datetime
+        log_line = f"[{datetime.datetime.now()}] open_shortcuts_dialog() called. existing dialog ref: {getattr(self, '_shortcuts_dialog', 'MISSING_ATTR')}\n"
+        for log_path in (os.path.join(os.path.expanduser("~"), "fermaloop_entry_log.txt"),
+                          os.path.join(os.getcwd(), "fermaloop_entry_log.txt")):
+            try:
+                with open(log_path, "a") as f:
+                    f.write(log_line)
+            except Exception:
+                pass
+        try:
+            self.status_var.set(f"open_shortcuts_dialog() entered at {datetime.datetime.now().strftime('%H:%M:%S')}")
+        except Exception:
+            pass
+
         # singleton: repeated clicks on the info icon were opening a brand
         # new window every time with no check for one already being open
         if getattr(self, "_shortcuts_dialog", None) is not None:
