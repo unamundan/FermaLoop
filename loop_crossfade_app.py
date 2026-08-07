@@ -813,7 +813,7 @@ class AudioPlayer:
             data = data[:, None]
         self.data = np.ascontiguousarray(data.astype(np.float32))
         self.sr = sr
-        self.declick_total = max(1, int(sr * 0.008))  # 8ms fade-in, applied after any jump
+        self.declick_total = max(1, int(sr * 0.02))  # 20ms fade-in, applied after any jump
         with self.lock:
             self.sel_start, self.sel_end, self.cursor = 0, len(self.data), 0
             self.play_start, self.play_end = 0, len(self.data)
@@ -933,6 +933,36 @@ class AudioPlayer:
                                         callback=self._callback, dtype="float32")
         self.stream.start()
         self.playing = True
+
+    def swap_playing_buffer(self, data, sr):
+        """Replaces the audio buffer WITHOUT stopping/restarting the actual
+        OS audio stream, when one is already running at a matching sample
+        rate/channel count. Used specifically for reprocessing WHILE
+        already auditioning (e.g. changing the crossfade value mid-play) --
+        stopping and recreating the whole PortAudio stream for that is a
+        heavier operation that can leave already-queued audio from the OLD
+        stream cut off abruptly, which is a SEPARATE click source from the
+        new-content-onset click the declick ramp handles. Falls back to a
+        plain stop+load (no play -- caller is expected to call play() in
+        that case) if a live swap isn't possible."""
+        if data.ndim == 1:
+            data = data[:, None]
+        new_data = np.ascontiguousarray(data.astype(np.float32))
+        with self.lock:
+            can_hot_swap = (self.playing and self.stream is not None
+                             and sr == self.sr and self.data is not None
+                             and new_data.shape[1] == self.data.shape[1])
+            if can_hot_swap:
+                self.data = new_data
+                self.sel_start, self.sel_end = 0, len(new_data)
+                self.cursor = 0
+                self.play_start, self.play_end = 0, len(new_data)
+                self.play_loop = self.loop
+                self.declick_remaining = self.declick_total
+                return True
+        self.stop()
+        self.load(new_data, sr)
+        return False
 
     def pause(self):
         if self.stream is not None:
@@ -2648,8 +2678,17 @@ class LoopCrossfadeGUI:
         something invalidates a processed preview that's currently loaded."""
         if not self.preview_mode:
             return
-        self.player.stop()
-        self.player.load(self.data, self.sr)
+        if self.player.playing:
+            # hot-swap instead of stop+load -- avoids tearing down the
+            # actual audio stream (a separate click source from the
+            # position-jump click the declick ramp handles) when this
+            # happens WHILE actively playing, e.g. clicking outside the
+            # loop region to check surrounding context mid-audition
+            self.player.swap_playing_buffer(self.data, self.sr)
+            self.player.set_loop(self.repeat_var.get())
+        else:
+            self.player.stop()
+            self.player.load(self.data, self.sr)
         self.player.set_selection(self.sel_start, self.sel_end)
         self.player.set_cursor(self.sel_start)  # load() resets cursor to 0; restore it to
                                                  # the loop start so a following Play resumes
@@ -2810,12 +2849,16 @@ class LoopCrossfadeGUI:
                 segment, self.sr, xfade_seconds, curve, snap, window, self.auto_xfade_var.get())
             elapsed = time.time() - t0
 
-            self.player.stop()
-            self.player.load(preview, self.sr)
+            was_already_auditioning = self.preview_mode and self.player.playing
+            if was_already_auditioning and self.player.swap_playing_buffer(preview, self.sr):
+                pass  # hot-swapped without touching the running audio stream
+            else:
+                self.player.stop()
+                self.player.load(preview, self.sr)
+                self.player.set_loop(True)
+                self.player.play()
             self.preview_mode = True
             self._refresh_loop_and_repeat_icons()
-            self.player.set_loop(True)
-            self.player.play()
             self._set_play_pause_icon(True)
 
             dur = preview.shape[0] / self.sr
@@ -2981,7 +3024,15 @@ class LoopCrossfadeGUI:
         required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
         saved = self.window_sizes.get("stretch")
         w, h = resolve_window_size(required_w, required_h, saved)
-        dlg.geometry(f"{w}x{h}")
+        # center over the main window -- this dialog previously only ever
+        # set a SIZE, never a position at all, leaving placement entirely
+        # to the OS default (which is what was landing it at top-left)
+        root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        root_w, root_h = self.root.winfo_width(), self.root.winfo_height()
+        x = root_x + max(0, (root_w - w) // 2)
+        y = root_y + max(0, (root_h - h) // 2)
+        dlg.geometry(f"{w}x{h}+{x}+{y}")
+        dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))
         dlg.minsize(required_w, required_h)
 
     def _poll_playhead(self):
