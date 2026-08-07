@@ -2569,21 +2569,6 @@ class LoopCrossfadeGUI:
         total = self.player.data.shape[0]
         return int(frac * total)
 
-    def _log_click_reposition_debug(self, original_sample, snapped_sample, before_amp, after_amp, kind, error=None):
-        import datetime
-        if error:
-            line = f"[{datetime.datetime.now()}] click-reposition EXCEPTION ({kind}): {error}\n"
-        else:
-            line = (f"[{datetime.datetime.now()}] click-reposition ({kind}): "
-                     f"{original_sample} -> {snapped_sample}, amplitude {before_amp} -> {after_amp}\n")
-        for log_path in (os.path.join(os.path.expanduser("~"), "fermaloop_click_log.txt"),
-                          os.path.join(os.getcwd(), "fermaloop_click_log.txt")):
-            try:
-                with open(log_path, "a") as f:
-                    f.write(line)
-            except Exception:
-                pass
-
     def _nearest_zero_crossing(self, data, sr, sample, window_ms=15):
         """Finds the sample index within a small window around `sample`
         where the waveform amplitude is closest to zero. Repositioning
@@ -2624,46 +2609,20 @@ class LoopCrossfadeGUI:
             w = self.canvas.winfo_width()
             samp = self._x_to_sample(event.x, w)
             samp = max(0, min(samp, len(self.data)))
-            # diagnostic: the Shortcuts window positioning bug turned out
-            # to be a silent exception in completely unrelated code that
-            # happened to be upstream of everything else -- applying the
-            # same "log unconditionally, append mode" technique here to
-            # rule in/out a similar silent failure preventing the
-            # zero-crossing snap from actually taking effect
-            try:
-                if self.preview_mode and self.sel_start <= samp < self.sel_end:
-                    # clicking WITHIN the loop region while auditioning: stay
-                    # in preview mode (don't fall back to raw/unprocessed
-                    # audio) -- this is what lets you scrub right up to the
-                    # loop-back point and hear the actual crossfaded wrap
-                    preview_cursor = self._raw_to_preview_cursor(samp)
-                    was_amp = None
-                    try:
-                        pd = self.player.data
-                        was_amp = float(np.abs(pd[preview_cursor]).max()) if pd is not None else None
-                    except Exception:
-                        pass
-                    preview_cursor = self._nearest_zero_crossing(self.player.data, self.player.sr, preview_cursor)
-                    new_amp = None
-                    try:
-                        pd = self.player.data
-                        new_amp = float(np.abs(pd[preview_cursor]).max()) if pd is not None else None
-                    except Exception:
-                        pass
-                    self.player.set_cursor(preview_cursor)
-                    self._log_click_reposition_debug(samp, preview_cursor, was_amp, new_amp, "preview")
-                else:
-                    # clicking outside the loop region: always operate on raw
-                    # audio, so you can freely check surrounding context
-                    self._exit_preview_mode()
-                    was_amp = float(np.abs(self.data[samp]).max()) if 0 <= samp < len(self.data) else None
-                    snapped = self._nearest_zero_crossing(self.data, self.sr, samp)
-                    new_amp = float(np.abs(self.data[snapped]).max()) if 0 <= snapped < len(self.data) else None
-                    self.player.set_cursor(snapped)
-                    self._log_click_reposition_debug(samp, snapped, was_amp, new_amp, "raw")
-            except Exception as e:
-                import traceback
-                self._log_click_reposition_debug(samp, None, None, None, "raw", error=f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+            if self.preview_mode and self.sel_start <= samp < self.sel_end:
+                # clicking WITHIN the loop region while auditioning: stay in
+                # preview mode (don't fall back to raw/unprocessed audio) --
+                # this is what lets you scrub right up to the loop-back
+                # point and hear the actual crossfaded wrap
+                preview_cursor = self._raw_to_preview_cursor(samp)
+                preview_cursor = self._nearest_zero_crossing(self.player.data, self.player.sr, preview_cursor)
+                self.player.set_cursor(preview_cursor)
+            else:
+                # clicking outside the loop region: always operate on raw
+                # audio, so you can freely check surrounding context
+                self._exit_preview_mode()
+                snapped = self._nearest_zero_crossing(self.data, self.sr, samp)
+                self.player.set_cursor(snapped)
             self._show_click_flag(event.x, samp)
             self._redraw()
         elif self.drag_mode in ("start", "end", "new") and self.pre_drag_selection is not None:
@@ -3259,65 +3218,20 @@ class LoopCrossfadeGUI:
         w, h = resolve_window_size(required_w, required_h, saved)
         dlg.minsize(required_w, required_h)
 
-        # ---- docked position: attaches to the main window's right edge,
-        # and follows it once the main window stops moving.
-        #
-        # This is debounced rather than live-synchronized during the drag
-        # itself: "slide-animates toward the taskbar" strongly suggests
-        # Windows is smoothly EASING the dialog toward each new requested
-        # position rather than snapping instantly, and <Configure> can
-        # fire many times per second during a real drag -- meaning each
-        # rapid geometry() call could be reading the dialog's position
-        # while a PREVIOUS animation from the last call is still in
-        # flight, compounding a directional bias with every step. Only
-        # repositioning once movement has paused avoids ever touching the
-        # dialog mid-animation. Trade-off: the dialog no longer visually
-        # slides in perfect real-time lockstep WHILE you're actively
-        # dragging -- it catches up shortly after you stop, which is less
-        # fluid but should be reliable rather than runaway. ----
-        last_root_pos = [self.root.winfo_rootx(), self.root.winfo_rooty()]
-        follow_after_id = [None]
-
-        def dock_position():
-            return (self.root.winfo_rootx() + self.root.winfo_width() + 10,
-                    self.root.winfo_rooty())
-
-        def apply_initial_geometry():
-            x, y = dock_position()
-            dlg.geometry(f"{w}x{h}+{x}+{y}")
-
-        def do_follow():
-            follow_after_id[0] = None
-            if not dlg.winfo_exists():
-                return
-            new_x, new_y = self.root.winfo_rootx(), self.root.winfo_rooty()
-            dx, dy = new_x - last_root_pos[0], new_y - last_root_pos[1]
-            last_root_pos[0], last_root_pos[1] = new_x, new_y
-            if dx == 0 and dy == 0:
-                return
-            dlg_x, dlg_y = dlg.winfo_rootx(), dlg.winfo_rooty()
-            dlg.geometry(f"+{dlg_x + dx}+{dlg_y + dy}")
-
-        def on_root_configure(event=None):
-            if follow_after_id[0] is not None:
-                self.root.after_cancel(follow_after_id[0])
-            follow_after_id[0] = self.root.after(150, do_follow)
-
-        apply_initial_geometry()
-        dlg.after(20, apply_initial_geometry)  # defensive re-apply against WM timing quirks
-        root_binding = self.root.bind("<Configure>", on_root_configure, add="+")
+        # ---- position: appears to the right of the main window, computed
+        # once when opened. Deliberately does NOT try to follow the main
+        # window if it's moved afterward -- that turned out to be a much
+        # harder problem than it looked (likely Windows animating the
+        # move rather than snapping instantly), and wasn't worth the
+        # complexity or risk it kept introducing. It's still fully
+        # draggable by hand once open, same as any other window. ----
+        x = self.root.winfo_rootx() + self.root.winfo_width() + 10
+        y = self.root.winfo_rooty()
+        dlg.geometry(f"{w}x{h}+{x}+{y}")
+        dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))  # defensive re-apply against WM timing quirks
 
         def on_close():
             save_shortcuts(self.shortcuts)
-            if follow_after_id[0] is not None:
-                try:
-                    self.root.after_cancel(follow_after_id[0])
-                except Exception:
-                    pass
-            try:
-                self.root.unbind("<Configure>", root_binding)
-            except Exception:
-                pass
             try:
                 self.window_sizes["shortcuts"] = {
                     "width": dlg.winfo_width(), "height": dlg.winfo_height(),
