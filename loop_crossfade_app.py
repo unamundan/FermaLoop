@@ -1667,6 +1667,7 @@ class LoopCrossfadeGUI:
         self._click_flag_after_id = None
         self._live_update_after_id = None
         self._canvas_tooltip = None
+        self._shortcuts_dialog = None
 
         for var in (self.xfade_var, self.curve_var, self.auto_xfade_var,
                     self.snap_var, self.window_var):
@@ -3098,8 +3099,22 @@ class LoopCrossfadeGUI:
         return "-".join(parts)
 
     def open_shortcuts_dialog(self):
+        # singleton: repeated clicks on the info icon were opening a brand
+        # new window every time with no check for one already being open
+        if getattr(self, "_shortcuts_dialog", None) is not None:
+            try:
+                if self._shortcuts_dialog.winfo_exists():
+                    self._shortcuts_dialog.deiconify()
+                    self._shortcuts_dialog.lift()
+                    self._shortcuts_dialog.focus_force()
+                    return
+            except Exception:
+                pass
+            self._shortcuts_dialog = None
+
         tk, ttk = self.tk, self.ttk
         dlg = tk.Toplevel(self.root)
+        self._shortcuts_dialog = dlg
         dlg.title("Keyboard Shortcuts")
         dlg.configure(bg=BG)
         dlg.transient(self.root)
@@ -3131,44 +3146,31 @@ class LoopCrossfadeGUI:
         ttk.Button(dlg, text="Done", command=lambda: on_close(), style="Accent.TButton").grid(
             row=len(rows), column=0, columnspan=2, pady=16, padx=10, sticky="ew")
 
+        # ---- position: docks to the main window's right edge, computed
+        # fresh every time the dialog opens (no persistence).
+        root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        root_w = self.root.winfo_width()
+        x = root_x + root_w + 10
+        y = root_y
+
+        # debug line -- MUST be added before measuring/sizing below, or the
+        # window gets locked to a height computed without it (exactly what
+        # was silently hiding this label last time: it existed in the
+        # widget tree, but the window was already too short to show it)
+        debug_text = (f"debug: root=({root_x},{root_y}) w={root_w}  ->  target=({x},{y})  "
+                      f"[also winfo_x/y=({self.root.winfo_x()},{self.root.winfo_y()})]")
+        ttk.Label(dlg, text=debug_text, background=BG, foreground=MUTED,
+                  font=("Segoe UI", 7), wraplength=280, justify="left").grid(
+                  row=len(rows) + 1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
+
         dlg.update_idletasks()
         required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
         saved = self.window_sizes.get("shortcuts", {})
         w, h = resolve_window_size(required_w, required_h, saved)
         dlg.minsize(required_w, required_h)
 
-        # ---- position: docks to the main window's right edge, computed
-        # fresh every time the dialog opens (no persistence -- see below).
-        #
-        # NOTE: this is the third attempt at this and it's still landing in
-        # the wrong place, which rules out my working theory from the last
-        # attempt (a corrupted persisted offset) since that version had NO
-        # persistence at all and still failed. That means either winfo_x()/
-        # winfo_y() are returning unexpected values on your system, or the
-        # window manager is ignoring the geometry request outright -- and I
-        # have no way to test real Tk window behavior on Windows from here,
-        # so a fourth blind guess isn't a responsible use of your time.
-        # Trying winfo_rootx()/rooty() instead (a genuinely different Tk
-        # API, not just a reworded version of the same call), AND printing
-        # the actual numbers being computed into the dialog itself -- if
-        # it's STILL wrong, please tell me exactly what that debug line
-        # says. That tells us definitively whether the calculation itself
-        # is wrong (fixable) or whether the OS is overriding a correct
-        # request outright (would need a different strategy entirely,
-        # like giving up on auto-positioning and just remembering the
-        # LAST place you manually dragged it to).
-        root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
-        root_w = self.root.winfo_width()
-        x = root_x + root_w + 10
-        y = root_y
         dlg.geometry(f"{w}x{h}+{x}+{y}")
         dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))
-
-        debug_text = (f"debug: root=({root_x},{root_y}) w={root_w}  ->  target=({x},{y})  "
-                      f"[also winfo_x/y=({self.root.winfo_x()},{self.root.winfo_y()})]")
-        ttk.Label(dlg, text=debug_text, background=BG, foreground=MUTED,
-                  font=("Segoe UI", 7)).grid(row=len(rows) + 1, column=0, columnspan=2,
-                                              sticky="ew", padx=10, pady=(0, 8))
 
         def on_close():
             save_shortcuts(self.shortcuts)
@@ -3179,6 +3181,7 @@ class LoopCrossfadeGUI:
                 save_window_sizes(self.window_sizes)
             except Exception:
                 pass
+            self._shortcuts_dialog = None
             dlg.destroy()
 
         dlg.protocol("WM_DELETE_WINDOW", on_close)
