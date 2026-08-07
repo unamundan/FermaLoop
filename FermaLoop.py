@@ -3234,7 +3234,7 @@ class LoopCrossfadeGUI:
                 dlg.bind("<KeyPress>", capture)
 
             for name, btn in rows.items():
-                btn.configure(command=lambda n=name, b=rows[n]: start_listening(n, b))
+                btn.configure(command=lambda n=name, b=btn: start_listening(n, b))
 
             ttk.Button(dlg, text="Done", command=lambda: on_close(), style="Accent.TButton").grid(
                 row=len(rows), column=0, columnspan=2, pady=16, padx=10, sticky="ew")
