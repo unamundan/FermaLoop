@@ -81,8 +81,8 @@ jobs:
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: LoopCrossfade-Windows
-          path: dist/LoopCrossfade.exe
+          name: FermaLoop-Windows
+          path: dist/FermaLoop.exe
 
   build-macos:
     runs-on: macos-latest
@@ -111,10 +111,10 @@ jobs:
           FermaLoop.py
 
       - name: Zip the .app bundle
-        run: cd dist && zip -r LoopCrossfade-Mac.zip LoopCrossfade.app
+        run: cd dist && zip -r FermaLoop-Mac.zip FermaLoop.app
 
       - name: Upload macOS build
         uses: actions/upload-artifact@v4
         with:
-          name: LoopCrossfade-Mac
-          path: dist/LoopCrossfade-Mac.zip
+          name: FermaLoop-Mac
+          path: dist/FermaLoop-Mac.zip
