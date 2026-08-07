@@ -929,8 +929,24 @@ class AudioPlayer:
             # jump and had the same audible-pop problem)
             self.declick_remaining = self.declick_total
         channels = self.data.shape[1]
-        self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
-                                        callback=self._callback, dtype="float32")
+        # latency='low' matters here specifically: without it, PortAudio's
+        # default latency setting can leave several buffers' worth of audio
+        # already queued in the driver at any moment -- meaning a click that
+        # jumps the cursor mid-playback might not actually reach the speaker
+        # output until AFTER a buffer or two of stale (pre-click) audio has
+        # already played, bypassing the declick ramp entirely (the ramp only
+        # affects content generated after the jump, not what's already
+        # queued). Lower latency shrinks that window. This is a different
+        # layer of the problem than the ramp itself, and one my direct
+        # callback-level testing couldn't have caught, since it only
+        # exercises the callback's own logic, not real driver buffering.
+        try:
+            self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
+                                            callback=self._callback, dtype="float32",
+                                            latency="low")
+        except Exception:
+            self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
+                                            callback=self._callback, dtype="float32")
         self.stream.start()
         self.playing = True
 
@@ -3146,31 +3162,30 @@ class LoopCrossfadeGUI:
         ttk.Button(dlg, text="Done", command=lambda: on_close(), style="Accent.TButton").grid(
             row=len(rows), column=0, columnspan=2, pady=16, padx=10, sticky="ew")
 
-        # ---- position: docks to the main window's right edge, computed
-        # fresh every time the dialog opens (no persistence).
         root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
         root_w = self.root.winfo_width()
         x = root_x + root_w + 10
         y = root_y
 
-        # debug line -- MUST be added before measuring/sizing below, or the
-        # window gets locked to a height computed without it (exactly what
-        # was silently hiding this label last time: it existed in the
-        # widget tree, but the window was already too short to show it)
         debug_text = (f"debug: root=({root_x},{root_y}) w={root_w}  ->  target=({x},{y})  "
                       f"[also winfo_x/y=({self.root.winfo_x()},{self.root.winfo_y()})]")
         ttk.Label(dlg, text=debug_text, background=BG, foreground=MUTED,
                   font=("Segoe UI", 7), wraplength=280, justify="left").grid(
                   row=len(rows) + 1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
 
+        # ---- from here down, this now EXACTLY mirrors open_stretch_dialog's
+        # order of operations (which positions correctly): measure, compute
+        # target x/y, geometry(), deferred re-apply, THEN minsize() last.
+        # The previous version called minsize() BEFORE geometry() -- a real,
+        # concrete ordering difference from the one dialog that's confirmed
+        # working, so this is a evidence-based change, not another guess. ----
         dlg.update_idletasks()
         required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
         saved = self.window_sizes.get("shortcuts", {})
         w, h = resolve_window_size(required_w, required_h, saved)
-        dlg.minsize(required_w, required_h)
-
         dlg.geometry(f"{w}x{h}+{x}+{y}")
         dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))
+        dlg.minsize(required_w, required_h)
 
         def on_close():
             save_shortcuts(self.shortcuts)
