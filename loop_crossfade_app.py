@@ -1599,7 +1599,7 @@ class LoopCrossfadeGUI:
         self.mp3_quality_var = tk.DoubleVar(value=2)
         self.mp3_quality_label_var = tk.StringVar(value="")
         self.auto_xfade_value_var = tk.StringVar(value="")
-        self.xfade_var = tk.StringVar(value="0.30")
+        self.xfade_var = tk.StringVar(value="1")
         self.curve_var = tk.StringVar(value="Equal power")
         self.auto_xfade_var = tk.BooleanVar(value=False)   # OFF by default, per spec
         self.snap_var = tk.BooleanVar(value=False)
@@ -3043,56 +3043,31 @@ class LoopCrossfadeGUI:
         w, h = resolve_window_size(required_w, required_h, saved)
         dlg.minsize(required_w, required_h)
 
-        # ---- docked position: attaches to the main window's right edge by
-        # default, and follows it as it moves. Remembers the OFFSET between
-        # the two windows (not an absolute screen spot, which wouldn't make
-        # sense once the main window has moved) -- so if you drag the
-        # dialog somewhere else, it keeps following from there instead. ----
-        default_offset_x = self.root.winfo_width() + 10
-        default_offset_y = 0
-        offset = [saved.get("offset_x", default_offset_x), saved.get("offset_y", default_offset_y)]
-        programmatic_move = {"flag": False}
-
-        def apply_geometry():
-            programmatic_move["flag"] = True
-            x = self.root.winfo_x() + offset[0]
-            y = self.root.winfo_y() + offset[1]
-            dlg.geometry(f"{w}x{h}+{x}+{y}")
-
-        def on_root_configure(event=None):
-            if dlg.winfo_exists():
-                apply_geometry()
-
-        def on_dialog_configure(event=None):
-            if programmatic_move["flag"]:
-                programmatic_move["flag"] = False
-                return
-            # the user dragged the dialog itself -- adopt the new offset so
-            # it keeps following from wherever they put it, not snapping back
-            offset[0] = dlg.winfo_x() - self.root.winfo_x()
-            offset[1] = dlg.winfo_y() - self.root.winfo_y()
-
-        apply_geometry()
-        # re-apply shortly after showing -- some window managers (notably
-        # on Windows) can silently override an initial geometry request
-        # before the window is fully mapped; a deferred re-apply is a
-        # standard, low-risk defensive measure against that specific
-        # timing issue without touching the window's visibility at all
-        dlg.after(20, apply_geometry)
-
-        root_binding = self.root.bind("<Configure>", on_root_configure, add="+")
-        dlg.bind("<Configure>", on_dialog_configure, add="+")
+        # ---- position: docks to the main window's right edge, computed
+        # fresh every time the dialog opens. Deliberately NOT persisted or
+        # continuously re-applied while dragging -- that fancier "follows
+        # the main window live" version turned out unreliable in practice
+        # (in one case, a one-time window-manager placement quirk got
+        # misread as "the user dragged it here" and permanently corrupted
+        # the saved position, which is likely why the previous version kept
+        # opening in the wrong spot no matter what). This simpler, one-shot
+        # version is far less likely to end up in a bad state: it always
+        # computes fresh from wherever the main window is *right now*, and
+        # you're still free to drag the dialog anywhere you like once open
+        # -- it just won't try to remember or re-follow after that.
+        x = self.root.winfo_x() + self.root.winfo_width() + 10
+        y = self.root.winfo_y()
+        dlg.geometry(f"{w}x{h}+{x}+{y}")
+        # re-apply once more shortly after showing -- some window managers
+        # (notably on Windows) can silently override an initial geometry
+        # request before the window is fully mapped
+        dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))
 
         def on_close():
             save_shortcuts(self.shortcuts)
             try:
-                self.root.unbind("<Configure>", root_binding)
-            except Exception:
-                pass
-            try:
                 self.window_sizes["shortcuts"] = {
                     "width": dlg.winfo_width(), "height": dlg.winfo_height(),
-                    "offset_x": offset[0], "offset_y": offset[1],
                 }
                 save_window_sizes(self.window_sizes)
             except Exception:
@@ -3114,6 +3089,11 @@ class LoopCrossfadeGUI:
         if self.sel_end <= self.sel_start:
             self.messagebox.showerror("FermaLoop", "Select a region on the waveform first.")
             return
+        if os.path.exists(out_path):
+            if not self.messagebox.askyesno(
+                    "FermaLoop",
+                    f"'{os.path.basename(out_path)}' already exists. Overwrite it?"):
+                return
 
         params = self._read_process_params()
         if params is None:
