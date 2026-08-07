@@ -1192,7 +1192,7 @@ def render_icon_image(name, size, color_hex, supersample=6, rotation_deg=0):
         # lowercase serif "i" -- drawn geometrically (stem + serif feet +
         # dot) rather than via a font, so it doesn't depend on a specific
         # font file being present on whatever machine the app runs on
-        stem_w = sw * 0.11
+        stem_w = sw * 0.16
         stem_top, stem_bot = sw * 0.42, sw * 0.82
         foot_w, foot_h = sw * 0.30, sw * 0.045
         draw.rounded_rectangle([cx - foot_w / 2, stem_top - foot_h / 2, cx + foot_w / 2, stem_top + foot_h / 2],
@@ -1598,6 +1598,7 @@ class LoopCrossfadeGUI:
         self.format_var = tk.StringVar(value="FLAC (Lossless)")
         self.mp3_quality_var = tk.DoubleVar(value=2)
         self.mp3_quality_label_var = tk.StringVar(value="")
+        self.auto_xfade_value_var = tk.StringVar(value="")
         self.xfade_var = tk.StringVar(value="0.30")
         self.curve_var = tk.StringVar(value="Equal power")
         self.auto_xfade_var = tk.BooleanVar(value=False)   # OFF by default, per spec
@@ -1739,9 +1740,12 @@ class LoopCrossfadeGUI:
         auto_proxy = tk.BooleanVar(value=auto_on)
         auto_cb = RoundedCheckbutton(auto_card, "Auto-detect crossfade length", auto_proxy,
                                       a_bg, a_fg, a_bg, a_check, BORDER, command=self._on_auto_detect_clicked)
-        auto_cb.pack(anchor="w", padx=10, pady=10)
+        auto_cb.pack(anchor="w", padx=10, pady=(10, 2))
         ToolTip(auto_cb.frame, "Automatically pick the crossfade length that best matches\n"
                                 "the head and tail of the selection, instead of a fixed value")
+        auto_value_fg = FG_ACTIVE if auto_on else FG_INACTIVE
+        tk.Label(auto_card, textvariable=self.auto_xfade_value_var, bg=a_bg, fg=auto_value_fg,
+                 font=("Segoe UI", 9)).pack(anchor="w", padx=(34, 10), pady=(0, 10))
 
         # ---- Manual card ----
         m_bg = CARD_BG_ACTIVE if not auto_on else CARD_BG_INACTIVE
@@ -1761,6 +1765,8 @@ class LoopCrossfadeGUI:
                                          height=26, radius=7, width=64)
         self.xfade_entry.pack(side="left")
         self._defocus_on_return(self.xfade_entry.entry)
+
+        self._update_auto_crossfade_preview()
 
     def _defocus_on_return(self, entry_widget):
         """Numeric entry fields (crossfade, search window, etc.) don't lose
@@ -1882,7 +1888,7 @@ class LoopCrossfadeGUI:
         ttk.Label(row, text="Format", width=7).pack(side="left")
         format_dropdown = RoundedDropdown(row, self.format_var, FORMAT_OPTIONS,
                                            BG, FIELD_BG, FG, BORDER, ACCENT, height=28, radius=8, width=180)
-        format_dropdown.pack(side="left", padx=(0, 10))
+        format_dropdown.pack(side="left", padx=(6, 10))
         ToolTip(format_dropdown.frame, "FLAC and MP4 (Apple Lossless) are both lossless; "
                                         "MP3 uses variable bitrate at the quality set below")
 
@@ -2013,11 +2019,9 @@ class LoopCrossfadeGUI:
 
         self._finalize_rounded_section(section_outer)
 
-        ttk.Frame(outer, height=1, style="Panel.TFrame").pack(fill="x", pady=14)
-
         btn_process = ttk.Button(outer, text="Process & Save", style="Accent.TButton",
                    command=self.run_process, takefocus=0)
-        btn_process.pack(fill="x", pady=(0, 10))
+        btn_process.pack(fill="x", pady=(10, 10))
         ToolTip(btn_process, "Crossfade the current selection and save it to the 'Save as' path")
 
         ttk.Label(outer, textvariable=self.status_var, style="Muted.TLabel",
@@ -2139,6 +2143,7 @@ class LoopCrossfadeGUI:
         self._click_flag = None
         self._redraw()
         self._update_selection_duration_label()
+        self._update_auto_crossfade_preview()
         dur = len(data) / sr
         self.status_var.set(f"Loaded {os.path.basename(path)} ({dur:.2f}s). Select a region, Audition to preview the loop, then Process & Save.")
 
@@ -2159,6 +2164,7 @@ class LoopCrossfadeGUI:
         self.player.set_selection(self.sel_start, self.sel_end)
         self._redraw()
         self._update_selection_duration_label()
+        self._update_auto_crossfade_preview()
 
     def push_undo(self):
         self.undo_stack.append(self._snapshot())
@@ -2326,6 +2332,7 @@ class LoopCrossfadeGUI:
         self.out_path_var.set("")
         self.time_var.set("00:00.000")
         self._update_selection_duration_label()
+        self._update_auto_crossfade_preview()
         self._redraw()
         self.status_var.set("Unloaded. Drag & drop an audio file, or click Browse.")
 
@@ -2440,6 +2447,7 @@ class LoopCrossfadeGUI:
 
         if self.drag_mode in ("start", "end", "new"):
             self._update_selection_duration_label()
+            self._update_auto_crossfade_preview()
             self._redraw()
 
     def _raw_to_preview_cursor(self, raw_sample):
@@ -2696,14 +2704,10 @@ class LoopCrossfadeGUI:
 
     def _update_auto_crossfade_preview(self):
         """Computes (without playing or saving) what Auto-detect would
-        currently pick for the selection, and shows it in the status bar --
-        the only other place this number normally appears is after actually
-        running Loop/Process & Save, which requires playback/saving first."""
-        if self.data is None or self.preview_mode:
-            return
-        if not self.auto_xfade_var.get():
-            return
-        if self.sel_end <= self.sel_start:
+        currently pick for the selection, and shows it both in the status
+        bar and as a live value directly under the Auto-detect checkbox."""
+        if self.data is None or self.preview_mode or not self.auto_xfade_var.get() or self.sel_end <= self.sel_start:
+            self.auto_xfade_value_var.set("")
             return
         try:
             segment = self.data[self.sel_start:self.sel_end]
@@ -2712,12 +2716,13 @@ class LoopCrossfadeGUI:
                 window = float(self.window_var.get())
                 segment, _, _ = snap_to_transients(segment, self.sr, window)
             xfade = auto_select_xfade(segment, self.sr, curve=curve)
+            self.auto_xfade_value_var.set(f"\u2248 {xfade * 1000:.0f} ms")
             self.status_var.set(
                 f"Auto-detected crossfade for the current selection: {xfade * 1000:.0f} ms. "
                 f"Click Audition Loop to preview it, or Process & Save to use it."
             )
         except Exception:
-            pass  # non-fatal -- this is just a live status hint
+            self.auto_xfade_value_var.set("")  # non-fatal -- this is just a live status hint
 
     def on_loop_preview(self, silent=False):
         """Toggle: a direct (non-silent) press while already auditioning
@@ -2799,6 +2804,7 @@ class LoopCrossfadeGUI:
         self.player.load(self.data, self.sr)
         self._redraw()
         self._update_selection_duration_label()
+        self._update_auto_crossfade_preview()
         dur = len(self.data) / self.sr
         self.status_var.set(f"Cropped to {dur:.2f}s. (Cmd/Ctrl+Z to undo.)")
 
@@ -2911,6 +2917,7 @@ class LoopCrossfadeGUI:
                 self.player.load(self.data, self.sr)
                 self._redraw()
                 self._update_selection_duration_label()
+                self._update_auto_crossfade_preview()
                 self.zoom_to_selection()
 
                 out_dur = stretched.shape[0] / self.sr
@@ -2999,11 +3006,6 @@ class LoopCrossfadeGUI:
     def open_shortcuts_dialog(self):
         tk, ttk = self.tk, self.ttk
         dlg = tk.Toplevel(self.root)
-        dlg.withdraw()  # stay hidden until correctly positioned -- setting
-                         # geometry before a Toplevel is fully mapped can be
-                         # silently overridden by the OS's own initial
-                         # placement (a known Tk/Windows timing issue, and
-                         # the likely cause of it always landing top-left)
         dlg.title("Keyboard Shortcuts")
         dlg.configure(bg=BG)
         dlg.transient(self.root)
@@ -3071,11 +3073,11 @@ class LoopCrossfadeGUI:
             offset[1] = dlg.winfo_y() - self.root.winfo_y()
 
         apply_geometry()
-        dlg.deiconify()
-        dlg.lift()
-        # re-apply once more after the window has actually been mapped --
-        # belt-and-suspenders against the same WM timing issue withdraw()
-        # above is already guarding against
+        # re-apply shortly after showing -- some window managers (notably
+        # on Windows) can silently override an initial geometry request
+        # before the window is fully mapped; a deferred re-apply is a
+        # standard, low-risk defensive measure against that specific
+        # timing issue without touching the window's visibility at all
         dlg.after(20, apply_geometry)
 
         root_binding = self.root.bind("<Configure>", on_root_configure, add="+")
