@@ -104,11 +104,21 @@ def _find_ffmpeg():
 FFMPEG_PATH = _find_ffmpeg()
 SUPPORTED_EXTS = {".wav", ".aif", ".aiff", ".mp3", ".mp4", ".m4a", ".flac"}
 
+# The three output formats the GUI's Format selector offers (input loading
+# still accepts the full SUPPORTED_EXTS set above).
+FORMAT_OPTIONS = ["FLAC (Lossless)", "MP4 (Apple Lossless)", "MP3 (VBR)"]
+FORMAT_EXT = {"FLAC (Lossless)": ".flac", "MP4 (Apple Lossless)": ".mp4", "MP3 (VBR)": ".mp3"}
+MP3_QUALITY_INFO = {
+    0: "best, ~220-260 kbps", 1: "~190-250 kbps", 2: "high quality, ~170-210 kbps",
+    3: "~150-195 kbps", 4: "~140-185 kbps", 5: "~120-150 kbps",
+    6: "~100-130 kbps", 7: "~80-120 kbps", 8: "~70-105 kbps", 9: "smallest, ~45-85 kbps",
+}
+
 FFMPEG_ENCODE_ARGS = {
-    ".mp3":  ["-c:a", "libmp3lame", "-q:a", "2"],
-    ".flac": ["-c:a", "flac"],
-    ".mp4":  ["-c:a", "aac", "-b:a", "192k"],
-    ".m4a":  ["-c:a", "aac", "-b:a", "192k"],
+    ".mp3":  ["-c:a", "libmp3lame", "-q:a", "2"],   # overridden dynamically by encode_from_pcm's mp3_quality param
+    ".flac": ["-c:a", "flac", "-compression_level", "8"],  # lossless; 8 = highest compression (smaller file, same quality)
+    ".mp4":  ["-c:a", "alac"],   # Apple Lossless -- verified bit-exact round-trip
+    ".m4a":  ["-c:a", "alac"],   # same container family as .mp4, same lossless codec
     ".aif":  ["-c:a", "pcm_s16le"],
     ".aiff": ["-c:a", "pcm_s16le"],
 }
@@ -270,9 +280,12 @@ def decode_to_pcm(path):
         return read_wav(tmp_wav)
 
 
-def encode_from_pcm(data, sr, sampwidth, out_path):
+def encode_from_pcm(data, sr, sampwidth, out_path, mp3_quality=2):
     """Write processed PCM data out in whatever format out_path's
-    extension indicates. Plain WAV skips ffmpeg entirely."""
+    extension indicates. Plain WAV skips ffmpeg entirely.
+
+    mp3_quality: LAME VBR quality, 0 (best/largest) to 9 (worst/smallest).
+    Only used for .mp3 output; ignored otherwise."""
     ext = os.path.splitext(out_path)[1].lower()
     if ext not in SUPPORTED_EXTS:
         raise ValueError(f"Unsupported output type '{ext}'. Supported: {sorted(SUPPORTED_EXTS)}")
@@ -285,7 +298,11 @@ def encode_from_pcm(data, sr, sampwidth, out_path):
     with tempfile.TemporaryDirectory() as tmp:
         tmp_wav = os.path.join(tmp, "processed.wav")
         write_wav(tmp_wav, data, sr, sampwidth)
-        codec_args = FFMPEG_ENCODE_ARGS.get(ext, [])
+        if ext == ".mp3":
+            q = max(0, min(9, int(round(mp3_quality))))
+            codec_args = ["-c:a", "libmp3lame", "-q:a", str(q)]
+        else:
+            codec_args = FFMPEG_ENCODE_ARGS.get(ext, [])
         cmd = [FFMPEG_PATH, "-y", "-i", tmp_wav, *codec_args, out_path]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode != 0:
@@ -590,11 +607,11 @@ def _run_pipeline(data, sr, xfade_seconds, curve, snap_transients, transient_win
 
 
 def process_file(in_path, out_path, xfade_seconds=None, curve="equal_power",
-                  snap_transients=False, transient_window=0.25, auto_xfade=False):
+                  snap_transients=False, transient_window=0.25, auto_xfade=False, mp3_quality=2):
     data, sr, sampwidth = decode_to_pcm(in_path)
     result, xfade_seconds, start_trim, end_trim = _run_pipeline(
         data, sr, xfade_seconds, curve, snap_transients, transient_window, auto_xfade)
-    encode_from_pcm(result, sr, sampwidth, out_path)
+    encode_from_pcm(result, sr, sampwidth, out_path, mp3_quality=mp3_quality)
 
     return {
         "n_samples": result.shape[0],
@@ -1467,6 +1484,9 @@ class LoopCrossfadeGUI:
 
         self.in_path_var = tk.StringVar()
         self.out_path_var = tk.StringVar()
+        self.format_var = tk.StringVar(value="FLAC (Lossless)")
+        self.mp3_quality_var = tk.DoubleVar(value=2)
+        self.mp3_quality_label_var = tk.StringVar(value="")
         self.xfade_var = tk.StringVar(value="0.30")
         self.curve_var = tk.StringVar(value="Equal power")
         self.auto_xfade_var = tk.BooleanVar(value=False)   # OFF by default, per spec
@@ -1484,6 +1504,7 @@ class LoopCrossfadeGUI:
         for var in (self.xfade_var, self.curve_var, self.auto_xfade_var,
                     self.snap_var, self.window_var):
             var.trace_add("write", self._on_param_changed)
+        self.format_var.trace_add("write", self._on_format_changed)
 
         self._build_widgets()
         self._bind_shortcuts()
@@ -1648,6 +1669,25 @@ class LoopCrossfadeGUI:
         btn_browse_out.pack(side="left")
         ToolTip(btn_browse_out, "Choose where to save the processed file")
 
+        row = ttk.Frame(outer); row.pack(fill="x", pady=3)
+        ttk.Label(row, text="Format", width=7).pack(side="left")
+        format_dropdown = RoundedDropdown(row, self.format_var, FORMAT_OPTIONS,
+                                           BG, FIELD_BG, FG, BORDER, ACCENT, height=28, radius=8, width=180)
+        format_dropdown.pack(side="left", padx=(0, 10))
+        ToolTip(format_dropdown.frame, "FLAC and MP4 (Apple Lossless) are both lossless; "
+                                        "MP3 uses variable bitrate at the quality set below")
+
+        self.mp3_quality_row = ttk.Frame(row)
+        mp3_scale = ttk.Scale(self.mp3_quality_row, from_=0, to=9, orient="horizontal",
+                               variable=self.mp3_quality_var, command=self._on_mp3_quality_change, length=140)
+        mp3_scale.pack(side="left")
+        ttk.Label(self.mp3_quality_row, textvariable=self.mp3_quality_label_var,
+                  style="Muted.TLabel").pack(side="left", padx=(8, 0))
+        ToolTip(self.mp3_quality_row, "MP3 VBR quality: left = smaller file/lower quality, "
+                                       "right = larger file/higher quality")
+        self._on_mp3_quality_change()
+        self._on_format_changed()
+
         # timeline ruler (shared coordinate space with the waveform below)
         self.timeline_canvas = tk.Canvas(outer, height=22, bg=BG, highlightthickness=0)
         self.timeline_canvas.pack(fill="x", pady=(12, 0))
@@ -1783,6 +1823,23 @@ class LoopCrossfadeGUI:
     def _toggle_window_entry(self):
         self.window_entry.configure(state="normal" if self.snap_var.get() else "disabled")
 
+    def _on_mp3_quality_change(self, value_str=None):
+        q = int(round(float(self.mp3_quality_var.get())))
+        self.mp3_quality_var.set(q)  # snap the slider to integer steps
+        self.mp3_quality_label_var.set(f"V{q} ({MP3_QUALITY_INFO.get(q, '')})")
+
+    def _on_format_changed(self, *args):
+        fmt = self.format_var.get()
+        ext = FORMAT_EXT.get(fmt, ".flac")
+        current = self.out_path_var.get()
+        if current:
+            base, _ = os.path.splitext(current)
+            self.out_path_var.set(base + ext)
+        if fmt == "MP3 (VBR)":
+            self.mp3_quality_row.pack(side="left")
+        else:
+            self.mp3_quality_row.pack_forget()
+
     # ---------------- file loading ----------------
 
     def choose_input(self):
@@ -1794,13 +1851,21 @@ class LoopCrossfadeGUI:
             self.load_file(path)
 
     def choose_output(self):
+        ext = FORMAT_EXT.get(self.format_var.get(), ".flac")
         path = self.filedialog.asksaveasfilename(
-            title="Save processed file as", defaultextension=".wav",
-            filetypes=[("WAV", "*.wav"), ("AIFF", "*.aiff"), ("MP3", "*.mp3"),
-                       ("MP4/M4A", "*.m4a"), ("FLAC", "*.flac")],
+            title="Save processed file as", defaultextension=ext,
+            filetypes=[("FLAC", "*.flac"), ("MP4 (Apple Lossless)", "*.mp4"), ("MP3", "*.mp3"),
+                       ("WAV", "*.wav"), ("AIFF", "*.aiff"), ("M4A", "*.m4a")],
         )
         if path:
             self.out_path_var.set(path)
+            # keep the Format selector in sync if the user picked a
+            # different extension directly in the save dialog
+            chosen_ext = os.path.splitext(path)[1].lower()
+            for label, e in FORMAT_EXT.items():
+                if e == chosen_ext and self.format_var.get() != label:
+                    self.format_var.set(label)
+                    break
 
     def _enable_drag_and_drop(self):
         for widget in (self.root, self.canvas):
@@ -1838,9 +1903,13 @@ class LoopCrossfadeGUI:
         self.player.load(data, sr)
 
         self.in_path_var.set(path)
-        # auto-fill Save As to the same directory as the loaded file
-        root_name, ext = os.path.splitext(path)
-        self.out_path_var.set(root_name + "_loop" + ext)
+        # auto-fill Save As to the same directory as the loaded file, using
+        # the currently-selected output FORMAT's extension (not necessarily
+        # the input file's own extension, since only FLAC/MP4/MP3 are
+        # offered as save targets)
+        root_name, orig_ext = os.path.splitext(path)
+        out_ext = FORMAT_EXT.get(self.format_var.get(), orig_ext)
+        self.out_path_var.set(root_name + "_loop" + out_ext)
 
         self._click_flag = None
         self._redraw()
@@ -2816,7 +2885,8 @@ class LoopCrossfadeGUI:
             result, used_xfade, start_trim, end_trim = _run_pipeline(
                 segment, self.sr, xfade_seconds, curve, snap, window, self.auto_xfade_var.get(),
             )
-            encode_from_pcm(result, self.sr, self.sampwidth, out_path)
+            encode_from_pcm(result, self.sr, self.sampwidth, out_path,
+                             mp3_quality=int(round(self.mp3_quality_var.get())))
             elapsed = time.time() - t0
             duration = result.shape[0] / self.sr
             msg = (f"Done in {elapsed:.2f}s -- {duration:.2f}s loop saved to:\n{out_path}\n"
@@ -2887,6 +2957,8 @@ def main():
                          help="Trim to the strongest transient near the start/end for beat/articulation alignment")
     parser.add_argument("--transient-window", type=float, default=0.25,
                          help="Search window in seconds for transient snapping (default: 0.25)")
+    parser.add_argument("--mp3-quality", type=int, default=2, choices=range(10),
+                         help="LAME VBR quality for .mp3 output: 0=best/largest, 9=worst/smallest (default: 2)")
     args = parser.parse_args()
 
     if args.xfade is None and not args.auto_xfade:
@@ -2896,7 +2968,7 @@ def main():
         args.input, args.output,
         xfade_seconds=args.xfade, curve=args.curve,
         snap_transients=args.snap_transients, transient_window=args.transient_window,
-        auto_xfade=args.auto_xfade,
+        auto_xfade=args.auto_xfade, mp3_quality=args.mp3_quality,
     )
     dur = info["n_samples"] / info["samplerate"]
     print(f"Wrote {args.output}: {dur:.3f}s, crossfade {info['xfade_seconds']*1000:.0f} ms")
