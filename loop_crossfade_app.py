@@ -1046,6 +1046,50 @@ def render_rounded_box_image(w, h, radius, fill_hex, border_hex, supersample=4):
     return img.resize((w, h), Image.LANCZOS)
 
 
+def render_dropdown_bg_image(w, h, radius, fill_hex, border_hex, caret_hex, supersample=4):
+    """Same rounded box as render_rounded_box_image, plus an anti-aliased
+    caret triangle baked in -- the caret used to be drawn separately as a
+    raw canvas polygon, which (like the rounded corners before PIL
+    rendering was added) isn't anti-aliased and looks jagged/distorted at
+    this size."""
+    w, h = max(1, int(w)), max(1, int(h))
+    sw, sh = w * supersample, h * supersample
+    img = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([0, 0, sw - 1, sh - 1], radius=radius * supersample,
+                            fill=_hex_to_rgb(fill_hex) + (255,),
+                            outline=_hex_to_rgb(border_hex) + (255,), width=max(1, supersample))
+    cx, cy = sw - 16 * supersample, sh / 2
+    s = 5 * supersample
+    draw.polygon([(cx - s, cy - 3 * supersample), (cx + s, cy - 3 * supersample), (cx, cy + 4 * supersample)],
+                 fill=_hex_to_rgb(caret_hex) + (255,))
+    return img.resize((w, h), Image.LANCZOS)
+
+
+def render_slider_image(w, h, track_radius, thumb_x, bg_hex, track_hex, fill_hex, thumb_hex, supersample=4):
+    """Anti-aliased horizontal slider: a rounded track, a filled 'progress'
+    portion up to the thumb, and a circular thumb -- all PIL-rendered for
+    the same reason the other custom widgets are (native ttk.Scale
+    rendering, especially the trough/thumb on Windows, largely ignores
+    ttk.Style overrides)."""
+    w, h = max(1, int(w)), max(1, int(h))
+    sw, sh = w * supersample, h * supersample
+    img = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    cy = sh / 2
+    pad = h / 2 * supersample
+    track_h = max(2, int(sh * 0.28))
+    draw.rounded_rectangle([pad, cy - track_h / 2, sw - pad, cy + track_h / 2],
+                            radius=track_h / 2, fill=_hex_to_rgb(track_hex) + (255,))
+    tx = thumb_x * supersample
+    if tx > pad:
+        draw.rounded_rectangle([pad, cy - track_h / 2, max(pad + 1, tx), cy + track_h / 2],
+                                radius=track_h / 2, fill=_hex_to_rgb(fill_hex) + (255,))
+    r = sh * 0.42
+    draw.ellipse([tx - r, cy - r, tx + r, cy + r], fill=_hex_to_rgb(thumb_hex) + (255,))
+    return img.resize((w, h), Image.LANCZOS)
+
+
 def render_checkbox_image(w, h, radius, checked, field_bg_hex, accent_hex, border_hex,
                            check_hex="#ffffff", supersample=4):
     """Anti-aliased rounded checkbox indicator with a smooth checkmark
@@ -1127,12 +1171,12 @@ def render_icon_image(name, size, color_hex, supersample=6, rotation_deg=0):
     elif name == "stretch":
         # calipers being pulled apart by a double-headed arrow
         pad2, top, bot, L = sw * 0.08, sw * 0.18, sw * 0.82, sw * 0.16
-        w = max(3, int(sw * 0.10))
+        w = max(3, int(sw * 0.13))
         draw.line([(pad2 + L, top), (pad2, top), (pad2, bot), (pad2 + L, bot)],
                   fill=color, width=w, joint="curve")
         draw.line([(sw - pad2 - L, top), (sw - pad2, top), (sw - pad2, bot), (sw - pad2 - L, bot)],
                   fill=color, width=w, joint="curve")
-        shaft_w = max(3, int(sw * 0.10))
+        shaft_w = max(3, int(sw * 0.13))
         s = sw * 0.17
         x_left, x_right = pad2 + L + sw * 0.02, sw - pad2 - L - sw * 0.02
         base_left, base_right = x_left + s, x_right - s
@@ -1140,26 +1184,26 @@ def render_icon_image(name, size, color_hex, supersample=6, rotation_deg=0):
         draw.polygon([(x_left, cy), (base_left, cy - s * 0.68), (base_left, cy + s * 0.68)], fill=color)
         draw.polygon([(x_right, cy), (base_right, cy - s * 0.68), (base_right, cy + s * 0.68)], fill=color)
     elif name == "crop":
-        w, L = max(3, int(sw * 0.13)), sw * 0.34
+        w, L = max(3, int(sw * 0.17)), sw * 0.34
         draw.line([(pad, pad + L), (pad, pad), (pad + L, pad)], fill=color, width=w, joint="curve")
         draw.line([(sw - pad, sw - pad - L), (sw - pad, sw - pad), (sw - pad - L, sw - pad)],
                    fill=color, width=w, joint="curve")
-    elif name == "gear":
-        outer_r, inner_r, n_teeth, tooth_w_deg = sw * 0.38, sw * 0.27, 8, 20
-        for i in range(n_teeth):
-            base_angle = i * (360 / n_teeth)
-            a0 = math.radians(base_angle - tooth_w_deg / 2)
-            a1 = math.radians(base_angle + tooth_w_deg / 2)
-            pts = [
-                (cx + inner_r * math.cos(a0), cy + inner_r * math.sin(a0)),
-                (cx + outer_r * math.cos(a0), cy + outer_r * math.sin(a0)),
-                (cx + outer_r * math.cos(a1), cy + outer_r * math.sin(a1)),
-                (cx + inner_r * math.cos(a1), cy + inner_r * math.sin(a1)),
-            ]
-            draw.polygon(pts, fill=color)
-        draw.ellipse([cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r], fill=color)
-        hole_r = sw * 0.15
-        draw.ellipse([cx - hole_r, cy - hole_r, cx + hole_r, cy + hole_r], fill=(0, 0, 0, 0))
+    elif name == "info":
+        # lowercase serif "i" -- drawn geometrically (stem + serif feet +
+        # dot) rather than via a font, so it doesn't depend on a specific
+        # font file being present on whatever machine the app runs on
+        stem_w = sw * 0.11
+        stem_top, stem_bot = sw * 0.42, sw * 0.82
+        foot_w, foot_h = sw * 0.30, sw * 0.045
+        draw.rounded_rectangle([cx - foot_w / 2, stem_top - foot_h / 2, cx + foot_w / 2, stem_top + foot_h / 2],
+                                radius=foot_h * 0.4, fill=color)
+        draw.rounded_rectangle([cx - foot_w / 2, stem_bot - foot_h / 2, cx + foot_w / 2, stem_bot + foot_h / 2],
+                                radius=foot_h * 0.4, fill=color)
+        draw.rounded_rectangle([cx - stem_w / 2, stem_top, cx + stem_w / 2, stem_bot],
+                                radius=stem_w * 0.3, fill=color)
+        dot_r = sw * 0.075
+        dot_cy = sw * 0.24
+        draw.ellipse([cx - dot_r, dot_cy - dot_r, cx + dot_r, dot_cy + dot_r], fill=color)
     elif name in ("undo", "redo"):
         clockwise = (name == "redo")
         r = sw * 0.27
@@ -1328,16 +1372,16 @@ class RoundedDropdown:
         w, h = self.fixed_width, self.height
         self.canvas.delete("all")
         if PIL_AVAILABLE:
-            img = render_rounded_box_image(w, h, self.radius, self.field_bg, self.border)
+            img = render_dropdown_bg_image(w, h, self.radius, self.field_bg, self.border, self.fg)
             self._bg_photo = ImageTk.PhotoImage(img)
             self.canvas.create_image(0, 0, anchor="nw", image=self._bg_photo)
         else:
             pts = _rounded_rect_points(w, h, self.radius)
             self.canvas.create_polygon(pts, smooth=True, fill=self.field_bg, outline=self.border)
+            cx, cy = w - 16, h / 2
+            self.canvas.create_polygon(cx - 5, cy - 3, cx + 5, cy - 3, cx, cy + 4, fill=self.fg)
         self.canvas.create_text(12, h / 2, anchor="w", text=self.variable.get(),
                                  fill=self.fg, font=("Segoe UI", 10))
-        cx, cy = w - 16, h / 2
-        self.canvas.create_polygon(cx - 5, cy - 3, cx + 5, cy - 3, cx, cy + 4, fill=self.fg)
 
     def _toggle_popup(self, event=None):
         if self.popup is not None:
@@ -1373,6 +1417,73 @@ class RoundedDropdown:
             except Exception:
                 pass
             self.popup = None
+
+    def pack(self, **kw):
+        self.frame.pack(**kw)
+
+
+class RoundedSlider:
+    """A ttk.Scale substitute styled to match the app's dark theme.
+    ttk.Scale's trough/thumb are largely native-theme-drawn (especially on
+    Windows) and don't reliably respect ttk.Style overrides -- the same
+    class of problem RoundedDropdown solves for Combobox. Integer-only
+    steps (used for the MP3 VBR quality 0-9 scale)."""
+
+    def __init__(self, parent, variable, from_, to, bg, track_hex, fill_hex, thumb_hex,
+                 width=140, height=20, command=None):
+        import tkinter as tk
+        self.tk = tk
+        self.variable, self.from_, self.to = variable, from_, to
+        self.bg, self.track_hex, self.fill_hex, self.thumb_hex = bg, track_hex, fill_hex, thumb_hex
+        self.width, self.height = width, height
+        self.command = command
+
+        self.frame = tk.Frame(parent, bg=bg)
+        self.canvas = tk.Canvas(self.frame, width=width, height=height, bg=bg, highlightthickness=0)
+        self.canvas.pack()
+        self._bg_photo = None
+        self.canvas.bind("<Button-1>", self._on_interact)
+        self.canvas.bind("<B1-Motion>", self._on_interact)
+        self._redraw()
+
+    def _value_to_x(self, value):
+        frac = (value - self.from_) / max(1e-9, (self.to - self.from_))
+        pad = self.height / 2
+        return pad + frac * (self.width - 2 * pad)
+
+    def _x_to_value(self, x):
+        pad = self.height / 2
+        frac = (x - pad) / max(1e-9, (self.width - 2 * pad))
+        frac = max(0.0, min(1.0, frac))
+        return round(self.from_ + frac * (self.to - self.from_))
+
+    def _on_interact(self, event):
+        value = self._x_to_value(event.x)
+        if value != self.variable.get():
+            self.variable.set(value)
+            self._redraw()
+            if self.command:
+                self.command(value)
+        else:
+            self._redraw()
+
+    def _redraw(self):
+        w, h = self.width, self.height
+        self.canvas.delete("all")
+        value = self.variable.get()
+        thumb_x = self._value_to_x(value)
+        track_r = h * 0.18
+        if PIL_AVAILABLE:
+            img = render_slider_image(w, h, track_r, thumb_x, self.bg,
+                                       self.track_hex, self.fill_hex, self.thumb_hex)
+            self._bg_photo = ImageTk.PhotoImage(img)
+            self.canvas.create_image(0, 0, anchor="nw", image=self._bg_photo)
+        else:
+            cy = h / 2
+            self.canvas.create_line(h / 2, cy, w - h / 2, cy, fill=self.track_hex, width=max(2, int(h * 0.3)))
+            self.canvas.create_line(h / 2, cy, thumb_x, cy, fill=self.fill_hex, width=max(2, int(h * 0.3)))
+            r = h * 0.4
+            self.canvas.create_oval(thumb_x - r, cy - r, thumb_x + r, cy + r, fill=self.thumb_hex, outline="")
 
     def pack(self, **kw):
         self.frame.pack(**kw)
@@ -1563,6 +1674,104 @@ class LoopCrossfadeGUI:
                 self._icon_cache[key] = None
         return self._icon_cache[key]
 
+    def _make_rounded_section(self, parent, fill_color, border_color, radius=12, padding=12):
+        """Returns (outer, inner). Build content into `inner` with normal
+        pack/grid, then call _finalize_rounded_section(outer) once -- it
+        measures the content's natural size and draws a properly-fitted
+        anti-aliased rounded-rect background behind it (same 'measure
+        first, draw to fit' approach as the other custom widgets)."""
+        tk = self.tk
+        outer = tk.Frame(parent, bg=BG)
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=fill_color)
+        outer._rc = {"canvas": canvas, "inner": inner, "fill": fill_color,
+                      "border": border_color, "radius": radius, "padding": padding}
+        return outer, inner
+
+    def _finalize_rounded_section(self, outer):
+        rc = outer._rc
+        canvas, inner, padding = rc["canvas"], rc["inner"], rc["padding"]
+        inner.update_idletasks()
+        w = inner.winfo_reqwidth() + padding * 2
+        h = inner.winfo_reqheight() + padding * 2
+        canvas.configure(width=w, height=h)
+        if PIL_AVAILABLE:
+            img = render_rounded_box_image(w, h, rc["radius"], rc["fill"], rc["border"])
+            photo = ImageTk.PhotoImage(img)
+            canvas._bg_photo = photo  # keep a reference or Tk garbage-collects it
+            canvas.create_image(0, 0, anchor="nw", image=photo)
+        canvas.create_window(padding, padding, anchor="nw", window=inner)
+
+    def _on_auto_detect_clicked(self):
+        self.auto_xfade_var.set(True)
+        self._rebuild_autodetect_manual_cards()
+        self._on_param_changed()
+
+    def _on_manual_clicked(self):
+        self.auto_xfade_var.set(False)
+        self._rebuild_autodetect_manual_cards()
+        self._on_param_changed()
+
+    def _rebuild_autodetect_manual_cards(self):
+        """Auto-detect and Manual crossfade are mutually exclusive (one
+        underlying bool, auto_xfade_var), presented as two 'cards' with a
+        distinct background shade from the rest of the section -- whichever
+        one is NOT currently active dims (muted colors) but stays fully
+        clickable, rather than being disabled outright."""
+        tk = self.tk
+        for child in self.auto_col_holder.winfo_children():
+            child.destroy()
+        for child in self.manual_col_holder.winfo_children():
+            child.destroy()
+
+        auto_on = self.auto_xfade_var.get()
+        CARD_BG_ACTIVE, CARD_BG_INACTIVE = FIELD_BG, "#1c1d20"
+        FG_ACTIVE, FG_INACTIVE = FG, MUTED
+        CHECK_ACTIVE, CHECK_INACTIVE = ACCENT, MUTED
+
+        # ---- Auto-detect card ----
+        a_bg = CARD_BG_ACTIVE if auto_on else CARD_BG_INACTIVE
+        a_fg = FG_ACTIVE if auto_on else FG_INACTIVE
+        a_check = CHECK_ACTIVE if auto_on else CHECK_INACTIVE
+        auto_card = tk.Frame(self.auto_col_holder, bg=a_bg)
+        auto_card.pack(fill="both", expand=True)
+        auto_proxy = tk.BooleanVar(value=auto_on)
+        auto_cb = RoundedCheckbutton(auto_card, "Auto-detect crossfade length", auto_proxy,
+                                      a_bg, a_fg, a_bg, a_check, BORDER, command=self._on_auto_detect_clicked)
+        auto_cb.pack(anchor="w", padx=10, pady=10)
+        ToolTip(auto_cb.frame, "Automatically pick the crossfade length that best matches\n"
+                                "the head and tail of the selection, instead of a fixed value")
+
+        # ---- Manual card ----
+        m_bg = CARD_BG_ACTIVE if not auto_on else CARD_BG_INACTIVE
+        m_fg = FG_ACTIVE if not auto_on else FG_INACTIVE
+        m_check = CHECK_ACTIVE if not auto_on else CHECK_INACTIVE
+        manual_card = tk.Frame(self.manual_col_holder, bg=m_bg)
+        manual_card.pack(fill="both", expand=True)
+        manual_proxy = tk.BooleanVar(value=not auto_on)
+        manual_cb = RoundedCheckbutton(manual_card, "Manual crossfade(s)", manual_proxy,
+                                        m_bg, m_fg, m_bg, m_check, BORDER, command=self._on_manual_clicked)
+        manual_cb.pack(anchor="w", padx=10, pady=(10, 4))
+        ToolTip(manual_cb.frame, "Crossfade duration in seconds (used when auto-detect is off)")
+        field_row = tk.Frame(manual_card, bg=m_bg)
+        field_row.pack(anchor="w", padx=10, pady=(0, 10))
+        entry_field_bg = FIELD_BG if not auto_on else "#232427"
+        self.xfade_entry = RoundedEntry(field_row, self.xfade_var, m_bg, entry_field_bg, m_fg, BORDER,
+                                         height=26, radius=7, width=64)
+        self.xfade_entry.pack(side="left")
+        self._defocus_on_return(self.xfade_entry.entry)
+
+    def _defocus_on_return(self, entry_widget):
+        """Numeric entry fields (crossfade, search window, etc.) don't lose
+        keyboard focus on their own after Return -- Tkinter Entry widgets
+        just don't do that by default. Without this, typing a value and
+        pressing Enter left the field focused, so a SUBSEQUENT press of
+        Space (meant as the global Play/Pause shortcut) typed a literal
+        space character into the field instead of toggling playback."""
+        entry_widget.bind("<Return>", lambda e: self.root.focus_set())
+        entry_widget.bind("<KP_Enter>", lambda e: self.root.focus_set())
+
     def _make_icon_button(self, parent, icon_name, tooltip_text, command, size=None, style="Icon.TButton"):
         """Icon-only button with a hover tooltip -- falls back to a short
         text label if Pillow isn't installed, so the button never ends up
@@ -1646,7 +1855,7 @@ class LoopCrossfadeGUI:
 
         header_row = ttk.Frame(outer); header_row.pack(fill="x", pady=(0, 10))
         ttk.Label(header_row, text="FermaLoop", style="Heading.TLabel").pack(side="left")
-        btn_gear = self._make_icon_button(header_row, "gear", "Keyboard Shortcuts...",
+        btn_gear = self._make_icon_button(header_row, "info", "Keyboard Shortcuts...",
                                            self.open_shortcuts_dialog, size=20)
         btn_gear.pack(side="right")
 
@@ -1678,8 +1887,9 @@ class LoopCrossfadeGUI:
                                         "MP3 uses variable bitrate at the quality set below")
 
         self.mp3_quality_row = ttk.Frame(row)
-        mp3_scale = ttk.Scale(self.mp3_quality_row, from_=0, to=9, orient="horizontal",
-                               variable=self.mp3_quality_var, command=self._on_mp3_quality_change, length=140)
+        mp3_scale = RoundedSlider(self.mp3_quality_row, self.mp3_quality_var, 0, 9,
+                                   BG, FIELD_BG, ACCENT, FG, width=140, height=20,
+                                   command=self._on_mp3_quality_change)
         mp3_scale.pack(side="left")
         ttk.Label(self.mp3_quality_row, textvariable=self.mp3_quality_label_var,
                   style="Muted.TLabel").pack(side="left", padx=(8, 0))
@@ -1754,45 +1964,54 @@ class LoopCrossfadeGUI:
 
         ttk.Frame(outer, height=1, style="Panel.TFrame").pack(fill="x", pady=14)
 
-        # processing options: Snap and Auto-detect side by side to save vertical space
-        options_row = ttk.Frame(outer); options_row.pack(fill="x", pady=4)
-        left_col = ttk.Frame(options_row); left_col.pack(side="left", fill="both", expand=True)
-        right_col = ttk.Frame(options_row); right_col.pack(side="left", fill="both", expand=True)
+        # ---- crossfade options: Curve alone at top, then a 3-column row
+        # (Snap / Auto-detect / Manual), all inside one rounded, thin-
+        # bordered container. Auto-detect and Manual are mutually
+        # exclusive; whichever is inactive dims but stays clickable. ----
+        section_outer, section_inner = self._make_rounded_section(outer, PANEL, BORDER, radius=12, padding=12)
+        section_outer.pack(fill="x", pady=(4, 10))
 
-        snap_cb = RoundedCheckbutton(left_col, "Snap loop points to transients",
-                            self.snap_var, BG, FG, FIELD_BG, ACCENT, BORDER,
+        curve_row = ttk.Frame(section_inner, style="Panel.TFrame")
+        curve_row.pack(fill="x", pady=(0, 10))
+        curve_wrapper = ttk.Frame(curve_row, style="Panel.TFrame")
+        curve_wrapper.pack(expand=True)
+        curve_combo = RoundedDropdown(curve_wrapper, self.curve_var, ["Equal power", "Linear"],
+                                       PANEL, FIELD_BG, FG, BORDER, ACCENT, height=28, radius=8, width=140)
+        curve_combo.pack()
+        ToolTip(curve_combo.frame, "Curve: shapes how the crossfade blends the two ends together.\n"
+                                    "Equal power: smoother, constant perceived loudness through the fade.\n"
+                                    "Linear: simpler ramp, can dip slightly in the middle.")
+
+        cols_row = ttk.Frame(section_inner, style="Panel.TFrame")
+        cols_row.pack(fill="x")
+
+        snap_col = tk.Frame(cols_row, bg=PANEL)
+        snap_col.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        snap_cb = RoundedCheckbutton(snap_col, "Snap loop points to transients",
+                            self.snap_var, PANEL, FG, FIELD_BG, ACCENT, BORDER,
                             command=self._toggle_window_entry)
-        snap_cb.pack(anchor="w")
+        snap_cb.pack(anchor="w", pady=(4, 0))
         ToolTip(snap_cb.frame, "Trim the selection to the strongest nearby attack at each end,\n"
-                                "so the loop starts/ends on the beat instead of an arbitrary sample")
-        field_row = ttk.Frame(left_col); field_row.pack(anchor="w", pady=(4, 0))
+                                "so the loop starts/ends on the beat instead of an arbitrary sample.\n"
+                                "Works alongside either Auto-detect or Manual crossfade.")
+        field_row = ttk.Frame(snap_col, style="Panel.TFrame")
+        field_row.pack(anchor="w", pady=(4, 4))
         ttk.Label(field_row, text="Search window(s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
-        self.window_entry = RoundedEntry(field_row, self.window_var, BG, FIELD_BG, FG, BORDER,
+        self.window_entry = RoundedEntry(field_row, self.window_var, PANEL, FIELD_BG, FG, BORDER,
                                           height=28, radius=8, width=70)
         self.window_entry.pack(side="left")
         self.window_entry.configure(state="disabled")
-        ToolTip(self.window_entry.frame, "How far from each end to search for a transient (seconds)")
+        self._defocus_on_return(self.window_entry.entry)
+        ToolTip(self.window_entry.frame, "How far from each end to search for a transient (seconds) -- "
+                                          "auto-populated, override by typing a new value")
 
-        auto_cb = RoundedCheckbutton(right_col, "Auto-detect crossfade length", self.auto_xfade_var,
-                            BG, FG, FIELD_BG, ACCENT, BORDER,
-                            command=self._toggle_xfade_entry)
-        auto_cb.pack(anchor="w")
-        ToolTip(auto_cb.frame, "Automatically pick the crossfade length that best matches\n"
-                                "the head and tail of the selection, instead of a fixed value")
-        field_row2 = ttk.Frame(right_col); field_row2.pack(anchor="w", pady=(4, 0))
-        ttk.Label(field_row2, text="Manual crossfade(s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
-        self.xfade_entry = RoundedEntry(field_row2, self.xfade_var, BG, FIELD_BG, FG, BORDER,
-                                         height=28, radius=8, width=70)
-        self.xfade_entry.pack(side="left")
-        ToolTip(self.xfade_entry.frame, "Crossfade duration in seconds (used when auto-detect is off)")
+        self.auto_col_holder = tk.Frame(cols_row, bg=PANEL)
+        self.auto_col_holder.pack(side="left", fill="both", expand=True, padx=4)
+        self.manual_col_holder = tk.Frame(cols_row, bg=PANEL)
+        self.manual_col_holder.pack(side="left", fill="both", expand=True, padx=(4, 0))
+        self._rebuild_autodetect_manual_cards()
 
-        row = ttk.Frame(outer); row.pack(fill="x", pady=(10, 4))
-        ttk.Label(row, text="Curve:", style="Muted.TLabel").pack(side="left", padx=(0, 6))
-        curve_combo = RoundedDropdown(row, self.curve_var, ["Equal power", "Linear"],
-                                       BG, FIELD_BG, FG, BORDER, ACCENT, height=28, radius=8, width=130)
-        curve_combo.pack(side="left")
-        ToolTip(curve_combo.frame, "Equal power: smoother, constant perceived loudness through the fade.\n"
-                              "Linear: simpler ramp, can dip slightly in the middle.")
+        self._finalize_rounded_section(section_outer)
 
         ttk.Frame(outer, height=1, style="Panel.TFrame").pack(fill="x", pady=14)
 
@@ -1858,6 +2077,11 @@ class LoopCrossfadeGUI:
                        ("WAV", "*.wav"), ("AIFF", "*.aiff"), ("M4A", "*.m4a")],
         )
         if path:
+            # Tk's file dialogs (built on Tcl, which uses forward slashes
+            # internally on every platform) can hand back forward-slash
+            # paths even on Windows -- normpath() converts to the native
+            # separator (backslash on Windows) without affecting POSIX.
+            path = os.path.normpath(path)
             self.out_path_var.set(path)
             # keep the Format selector in sync if the user picked a
             # different extension directly in the save dialog
@@ -1878,6 +2102,7 @@ class LoopCrossfadeGUI:
             self.load_file(paths[0])
 
     def load_file(self, path):
+        path = os.path.normpath(path)  # normalize separators (see choose_output for why)
         ext = os.path.splitext(path)[1].lower()
         if ext not in SUPPORTED_EXTS:
             self.messagebox.showerror("FermaLoop", f"Unsupported file type: {ext}")
@@ -1909,7 +2134,7 @@ class LoopCrossfadeGUI:
         # offered as save targets)
         root_name, orig_ext = os.path.splitext(path)
         out_ext = FORMAT_EXT.get(self.format_var.get(), orig_ext)
-        self.out_path_var.set(root_name + "_loop" + out_ext)
+        self.out_path_var.set(os.path.normpath(root_name + "_loop" + out_ext))
 
         self._click_flag = None
         self._redraw()
@@ -2623,14 +2848,18 @@ class LoopCrossfadeGUI:
         row = ttk.Frame(dlg); row.pack(fill="x", padx=14, pady=(4, 0))
         ttk.Label(row, text="Stretch factor:", background=BG, foreground=FG).pack(side="left")
         factor_var = tk.StringVar(value="8.0")
-        RoundedEntry(row, factor_var, BG, FIELD_BG, FG, BORDER, height=28, radius=8, width=80).pack(side="right")
+        factor_entry = RoundedEntry(row, factor_var, BG, FIELD_BG, FG, BORDER, height=28, radius=8, width=80)
+        factor_entry.pack(side="right")
+        self._defocus_on_return(factor_entry.entry)
         ttk.Label(dlg, text="Typical range: 2-50 (higher takes longer and produces much longer output)",
                   background=BG, foreground=MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(2, 8))
 
         row = ttk.Frame(dlg); row.pack(fill="x", padx=14, pady=(4, 0))
         ttk.Label(row, text="Window size:", background=BG, foreground=FG).pack(side="left")
         window_var = tk.StringVar(value="0.25")
-        RoundedEntry(row, window_var, BG, FIELD_BG, FG, BORDER, height=28, radius=8, width=80).pack(side="right")
+        stretch_window_entry = RoundedEntry(row, window_var, BG, FIELD_BG, FG, BORDER, height=28, radius=8, width=80)
+        stretch_window_entry.pack(side="right")
+        self._defocus_on_return(stretch_window_entry.entry)
         ttk.Label(dlg, text="Typical range: 0.05-2.0 seconds (0.1-0.25 is a good starting point)",
                   background=BG, foreground=MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(2, 0))
         ttk.Label(dlg, text="Smaller reduces amplitude pulsing but can sound grainier/less full; "
@@ -2770,6 +2999,11 @@ class LoopCrossfadeGUI:
     def open_shortcuts_dialog(self):
         tk, ttk = self.tk, self.ttk
         dlg = tk.Toplevel(self.root)
+        dlg.withdraw()  # stay hidden until correctly positioned -- setting
+                         # geometry before a Toplevel is fully mapped can be
+                         # silently overridden by the OS's own initial
+                         # placement (a known Tk/Windows timing issue, and
+                         # the likely cause of it always landing top-left)
         dlg.title("Keyboard Shortcuts")
         dlg.configure(bg=BG)
         dlg.transient(self.root)
@@ -2801,17 +3035,20 @@ class LoopCrossfadeGUI:
         ttk.Button(dlg, text="Done", command=lambda: on_close(), style="Accent.TButton").grid(
             row=len(rows), column=0, columnspan=2, pady=16, padx=10, sticky="ew")
 
-        # ---- size (as before) ----
         dlg.update_idletasks()
         required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
         saved = self.window_sizes.get("shortcuts", {})
         w, h = resolve_window_size(required_w, required_h, saved)
         dlg.minsize(required_w, required_h)
 
-        # ---- "magnetized" position: follows the main window as it moves,
-        # remembering the offset between them (not an absolute screen spot,
-        # since that wouldn't make sense once the main window has moved) ----
-        offset = [saved.get("offset_x", 40), saved.get("offset_y", 60)]
+        # ---- docked position: attaches to the main window's right edge by
+        # default, and follows it as it moves. Remembers the OFFSET between
+        # the two windows (not an absolute screen spot, which wouldn't make
+        # sense once the main window has moved) -- so if you drag the
+        # dialog somewhere else, it keeps following from there instead. ----
+        default_offset_x = self.root.winfo_width() + 10
+        default_offset_y = 0
+        offset = [saved.get("offset_x", default_offset_x), saved.get("offset_y", default_offset_y)]
         programmatic_move = {"flag": False}
 
         def apply_geometry():
@@ -2834,6 +3071,13 @@ class LoopCrossfadeGUI:
             offset[1] = dlg.winfo_y() - self.root.winfo_y()
 
         apply_geometry()
+        dlg.deiconify()
+        dlg.lift()
+        # re-apply once more after the window has actually been mapped --
+        # belt-and-suspenders against the same WM timing issue withdraw()
+        # above is already guarding against
+        dlg.after(20, apply_geometry)
+
         root_binding = self.root.bind("<Configure>", on_root_configure, add="+")
         dlg.bind("<Configure>", on_dialog_configure, add="+")
 
