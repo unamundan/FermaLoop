@@ -2569,7 +2569,7 @@ class LoopCrossfadeGUI:
         total = self.player.data.shape[0]
         return int(frac * total)
 
-    def _nearest_zero_crossing(self, data, sr, sample, window_ms=10):
+    def _nearest_zero_crossing(self, data, sr, sample, window_ms=15):
         """Finds the sample index within a small window around `sample`
         where the waveform amplitude is closest to zero. Repositioning
         playback to click PRECISELY where the user clicked, mid-waveform-
@@ -2579,7 +2579,14 @@ class LoopCrossfadeGUI:
         envelope itself has a discontinuity at that instant. Starting from
         a near-zero-amplitude point removes the discontinuity at the
         source rather than just smoothing over it. A few samples of
-        position accuracy is an easy trade for a genuinely clean splice."""
+        position accuracy is an easy trade for a genuinely clean splice.
+
+        Uses the MAX absolute value across channels, not the mono mix --
+        averaging channels together can hide a real discontinuity: for
+        out-of-phase stereo content (e.g. some reverb/widening effects),
+        the mix can read as exactly zero at every point in the whole
+        signal even while each individual channel sits at full amplitude,
+        which would mean the search never moves the click at all."""
         if data is None or len(data) == 0:
             return sample
         window = max(1, int(sr * window_ms / 1000))
@@ -2589,8 +2596,8 @@ class LoopCrossfadeGUI:
         if hi <= lo:
             return sample
         segment = data[lo:hi]
-        mono = segment.mean(axis=1) if segment.ndim > 1 else segment
-        idx = int(np.argmin(np.abs(mono)))
+        magnitude = np.abs(segment).max(axis=1) if segment.ndim > 1 else np.abs(segment)
+        idx = int(np.argmin(magnitude))
         return lo + idx
 
     def _on_canvas_release(self, event):
@@ -3223,30 +3230,32 @@ class LoopCrossfadeGUI:
             dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))
             dlg.minsize(required_w, required_h)
 
-            # a custom Label inside this dialog has twice failed to actually
-            # become visible for reasons I haven't been able to pin down --
-            # switching to a plain messagebox instead: dead simple, a totally
-            # different Tk code path, much harder for it to silently fail
-            self.messagebox.showinfo(
-                "FermaLoop debug",
+            debug_text = (
                 f"root window: pos=({root_x},{root_y}) width={root_w}\n"
                 f"(alt) winfo_x/y=({self.root.winfo_x()},{self.root.winfo_y()})\n"
                 f"computed target position: ({x},{y})\n"
                 f"dialog size: {w}x{h}\n"
-                f"screen size: {self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}\n\n"
-                f"Please screenshot or copy this exact text back."
+                f"screen size: {self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}\n"
             )
         except Exception as e:
             # this dialog's positioning code has silently failed to have
-            # any visible effect through several previous fix attempts,
-            # including a debug label that never appeared -- if that was
-            # actually a swallowed exception rather than a rendering issue,
-            # THIS surfaces it explicitly instead of failing silently again
+            # any visible effect through several previous fix attempts --
+            # capture whatever the real exception is, if any
             import traceback
-            self.messagebox.showerror(
-                "FermaLoop debug -- an error occurred while positioning this window",
-                f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
-            )
+            debug_text = f"EXCEPTION while positioning:\n{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+
+        # a custom Label, and then a messagebox even wrapped in try/except,
+        # have BOTH failed to become visible through several attempts now --
+        # writing to a file sidesteps GUI rendering/stacking/visibility
+        # entirely, and the status bar is a channel we know works (it's
+        # been rendering correctly the whole time this app has existed)
+        try:
+            debug_path = os.path.join(os.path.expanduser("~"), "fermaloop_debug.txt")
+            with open(debug_path, "w") as f:
+                f.write(debug_text)
+            self.status_var.set(f"Debug info written to: {debug_path}  --  please open that file and paste its contents back")
+        except Exception as file_err:
+            self.status_var.set(f"Even the debug file write failed: {file_err}")
 
         def on_close():
             save_shortcuts(self.shortcuts)
