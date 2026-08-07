@@ -2245,7 +2245,7 @@ class LoopCrossfadeGUI:
         # offered as save targets)
         root_name, orig_ext = os.path.splitext(path)
         out_ext = FORMAT_EXT.get(self.format_var.get(), orig_ext)
-        self.out_path_var.set(os.path.normpath(root_name + "_loop" + out_ext))
+        self.out_path_var.set(os.path.normpath(root_name + " LOOP" + out_ext))
 
         self._click_flag = None
         self._redraw()
