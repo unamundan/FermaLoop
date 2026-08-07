@@ -813,7 +813,7 @@ class AudioPlayer:
             data = data[:, None]
         self.data = np.ascontiguousarray(data.astype(np.float32))
         self.sr = sr
-        self.declick_total = max(1, int(sr * 0.02))  # 20ms fade-in, applied after any jump
+        self.declick_total = max(1, int(sr * 0.035))  # 35ms fade-in, applied after any jump
         with self.lock:
             self.sel_start, self.sel_end, self.cursor = 0, len(self.data), 0
             self.play_start, self.play_end = 0, len(self.data)
@@ -894,11 +894,18 @@ class AudioPlayer:
                 # only applied here (the jump-origin chunk) -- deliberately
                 # NOT applied to the loop-wrap continuation below, since a
                 # raw/un-crossfaded loop's seam click is something the user
-                # explicitly wants to still hear when previewing it
+                # explicitly wants to still hear when previewing it.
+                # 1-cos(t*pi/2) starts at 0 with ZERO slope (a gentle onset,
+                # avoiding any abruptness right at the jump point) and
+                # reaches full level with a steeper finish -- this is the
+                # correct raised-cosine fade-IN shape. (Note: sin(t*pi/2),
+                # used in an earlier version of this, actually has its
+                # STEEPEST slope at t=0, the opposite of what was intended.)
                 ramp_n = min(n, self.declick_remaining)
-                start_gain = 1.0 - self.declick_remaining / self.declick_total
-                end_gain = 1.0 - (self.declick_remaining - ramp_n) / self.declick_total
-                gains = np.linspace(start_gain, end_gain, ramp_n, endpoint=False).reshape(-1, 1)
+                t_start = 1.0 - self.declick_remaining / self.declick_total
+                t_end = 1.0 - (self.declick_remaining - ramp_n) / self.declick_total
+                t = np.linspace(t_start, t_end, ramp_n, endpoint=False)
+                gains = (1.0 - np.cos(t * np.pi / 2)).astype(np.float32).reshape(-1, 1)
                 outdata[:ramp_n] *= gains
                 self.declick_remaining -= ramp_n
             self.cursor += n
@@ -943,10 +950,15 @@ class AudioPlayer:
         try:
             self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
                                             callback=self._callback, dtype="float32",
-                                            latency="low")
+                                            latency="low", blocksize=256)
         except Exception:
-            self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
-                                            callback=self._callback, dtype="float32")
+            try:
+                self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
+                                                callback=self._callback, dtype="float32",
+                                                latency="low")
+            except Exception:
+                self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
+                                                callback=self._callback, dtype="float32")
         self.stream.start()
         self.playing = True
 
@@ -3167,12 +3179,6 @@ class LoopCrossfadeGUI:
         x = root_x + root_w + 10
         y = root_y
 
-        debug_text = (f"debug: root=({root_x},{root_y}) w={root_w}  ->  target=({x},{y})  "
-                      f"[also winfo_x/y=({self.root.winfo_x()},{self.root.winfo_y()})]")
-        ttk.Label(dlg, text=debug_text, background=BG, foreground=MUTED,
-                  font=("Segoe UI", 7), wraplength=280, justify="left").grid(
-                  row=len(rows) + 1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
-
         # ---- from here down, this now EXACTLY mirrors open_stretch_dialog's
         # order of operations (which positions correctly): measure, compute
         # target x/y, geometry(), deferred re-apply, THEN minsize() last.
@@ -3186,6 +3192,20 @@ class LoopCrossfadeGUI:
         dlg.geometry(f"{w}x{h}+{x}+{y}")
         dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))
         dlg.minsize(required_w, required_h)
+
+        # a custom Label inside this dialog has twice failed to actually
+        # become visible for reasons I haven't been able to pin down --
+        # switching to a plain messagebox instead: dead simple, a totally
+        # different Tk code path, much harder for it to silently fail
+        self.messagebox.showinfo(
+            "FermaLoop debug",
+            f"root window: pos=({root_x},{root_y}) width={root_w}\n"
+            f"(alt) winfo_x/y=({self.root.winfo_x()},{self.root.winfo_y()})\n"
+            f"computed target position: ({x},{y})\n"
+            f"dialog size: {w}x{h}\n"
+            f"screen size: {self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}\n\n"
+            f"Please screenshot or copy this exact text back."
+        )
 
         def on_close():
             save_shortcuts(self.shortcuts)
