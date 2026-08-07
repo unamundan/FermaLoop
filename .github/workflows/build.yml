@@ -76,13 +76,13 @@ jobs:
           pyinstaller --onefile --windowed --name LoopCrossfade
           --add-binary "ffmpeg.exe;."
           --collect-all sounddevice --collect-all tkinterdnd2
-          FermaLoop.py
+          loop_crossfade_app.py
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: FermaLoop-Windows
-          path: dist/FermaLoop.exe
+          name: LoopCrossfade-Windows
+          path: dist/LoopCrossfade.exe
 
   build-macos:
     runs-on: macos-latest
@@ -108,13 +108,13 @@ jobs:
           pyinstaller --onefile --windowed --name LoopCrossfade
           --add-binary "ffmpeg:."
           --collect-all sounddevice --collect-all tkinterdnd2
-          FermaLoop.py
+          loop_crossfade_app.py
 
       - name: Zip the .app bundle
-        run: cd dist && zip -r FermaLoop-Mac.zip FermaLoop.app
+        run: cd dist && zip -r LoopCrossfade-Mac.zip LoopCrossfade.app
 
       - name: Upload macOS build
         uses: actions/upload-artifact@v4
         with:
-          name: FermaLoop-Mac
-          path: dist/FermaLoop-Mac.zip
+          name: LoopCrossfade-Mac
+          path: dist/LoopCrossfade-Mac.zip
