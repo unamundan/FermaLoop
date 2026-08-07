@@ -3219,37 +3219,45 @@ class LoopCrossfadeGUI:
         dlg.minsize(required_w, required_h)
 
         # ---- docked position: attaches to the main window's right edge,
-        # and follows it live if the main window is dragged. Tracks the
-        # offset between the two windows (not an absolute screen spot,
-        # which wouldn't make sense once the main window has moved) -- so
-        # if you drag the dialog itself somewhere else, it keeps following
-        # from there instead of snapping back to the right edge. ----
-        offset = [self.root.winfo_width() + 10, 0]
-        programmatic_move = {"flag": False}
+        # and follows it live if the main window is dragged.
+        #
+        # This tracks the delta the MAIN window moves by (comparing its
+        # own position now vs. last time), and shifts the dialog by that
+        # same delta -- rather than maintaining a persistent "offset"
+        # value that gets recomputed by reading the dialog's position
+        # back after every move. That approach had a real bug: reading a
+        # window's position back immediately after calling geometry() on
+        # it can return a stale value if the window manager hasn't fully
+        # caught up yet, and since that stale reading got stored and
+        # reused as the base for the NEXT correction too, the error
+        # compounded on every single move during a drag -- exactly the
+        # progressive downward drift that was reported. Tracking the
+        # MAIN window's own position instead avoids this: we're never
+        # reading back a window immediately after moving it ourselves. ----
+        last_root_pos = [self.root.winfo_rootx(), self.root.winfo_rooty()]
 
-        def apply_geometry():
-            programmatic_move["flag"] = True
-            x = self.root.winfo_rootx() + offset[0]
-            y = self.root.winfo_rooty() + offset[1]
+        def dock_position():
+            return (self.root.winfo_rootx() + self.root.winfo_width() + 10,
+                    self.root.winfo_rooty())
+
+        def apply_initial_geometry():
+            x, y = dock_position()
             dlg.geometry(f"{w}x{h}+{x}+{y}")
 
         def on_root_configure(event=None):
-            if dlg.winfo_exists():
-                apply_geometry()
-
-        def on_dialog_configure(event=None):
-            if programmatic_move["flag"]:
-                programmatic_move["flag"] = False
+            if not dlg.winfo_exists():
                 return
-            # the user dragged the dialog itself -- adopt the new offset so
-            # it keeps following from wherever they put it, not snapping back
-            offset[0] = dlg.winfo_rootx() - self.root.winfo_rootx()
-            offset[1] = dlg.winfo_rooty() - self.root.winfo_rooty()
+            new_x, new_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+            dx, dy = new_x - last_root_pos[0], new_y - last_root_pos[1]
+            last_root_pos[0], last_root_pos[1] = new_x, new_y
+            if dx == 0 and dy == 0:
+                return
+            dlg_x, dlg_y = dlg.winfo_rootx(), dlg.winfo_rooty()
+            dlg.geometry(f"+{dlg_x + dx}+{dlg_y + dy}")
 
-        apply_geometry()
-        dlg.after(20, apply_geometry)  # defensive re-apply against WM timing quirks
+        apply_initial_geometry()
+        dlg.after(20, apply_initial_geometry)  # defensive re-apply against WM timing quirks
         root_binding = self.root.bind("<Configure>", on_root_configure, add="+")
-        dlg.bind("<Configure>", on_dialog_configure, add="+")
 
         def on_close():
             save_shortcuts(self.shortcuts)
