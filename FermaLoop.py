@@ -3209,8 +3209,9 @@ class LoopCrossfadeGUI:
         for name, btn in rows.items():
             btn.configure(command=lambda n=name, b=btn: start_listening(n, b))
 
-        ttk.Button(dlg, text="Done", command=lambda: on_close()).grid(
-            row=len(rows), column=1, pady=16, padx=10, sticky="e")
+        # a bit of bottom margin now that the Done button (redundant with
+        # the window's native close button) is gone
+        tk.Frame(dlg, height=10, bg=BG).grid(row=len(rows), column=0, columnspan=2)
 
         dlg.update_idletasks()
         required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
