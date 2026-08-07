@@ -711,9 +711,14 @@ def resolve_window_size(required_w, required_h, saved):
     time."""
     if not saved:
         return required_w, required_h
-    w = max(required_w, saved.get("width", required_w))
-    h = max(required_h, saved.get("height", required_h))
-    return w, h
+    try:
+        w = max(required_w, int(saved.get("width", required_w)))
+        h = max(required_h, int(saved.get("height", required_h)))
+        return w, h
+    except (TypeError, ValueError):
+        # malformed/stale saved data (e.g. from an older, different schema)
+        # -- fall back to the freshly-measured size rather than crash
+        return required_w, required_h
 
 
 # ---------------------------------------------------------------------------
@@ -813,7 +818,7 @@ class AudioPlayer:
             data = data[:, None]
         self.data = np.ascontiguousarray(data.astype(np.float32))
         self.sr = sr
-        self.declick_total = max(1, int(sr * 0.035))  # 35ms fade-in, applied after any jump
+        self.declick_total = max(1, int(sr * 0.05))  # 50ms fade-in, applied after any jump
         with self.lock:
             self.sel_start, self.sel_end, self.cursor = 0, len(self.data), 0
             self.play_start, self.play_end = 0, len(self.data)
@@ -2564,6 +2569,30 @@ class LoopCrossfadeGUI:
         total = self.player.data.shape[0]
         return int(frac * total)
 
+    def _nearest_zero_crossing(self, data, sr, sample, window_ms=10):
+        """Finds the sample index within a small window around `sample`
+        where the waveform amplitude is closest to zero. Repositioning
+        playback to click PRECISELY where the user clicked, mid-waveform-
+        cycle, is exactly what produces an audible tick even with a fade
+        applied -- fading from silence into a signal that was ALREADY at
+        significant amplitude right at the splice point still means the
+        envelope itself has a discontinuity at that instant. Starting from
+        a near-zero-amplitude point removes the discontinuity at the
+        source rather than just smoothing over it. A few samples of
+        position accuracy is an easy trade for a genuinely clean splice."""
+        if data is None or len(data) == 0:
+            return sample
+        window = max(1, int(sr * window_ms / 1000))
+        n = len(data)
+        lo = max(0, sample - window)
+        hi = min(n, sample + window)
+        if hi <= lo:
+            return sample
+        segment = data[lo:hi]
+        mono = segment.mean(axis=1) if segment.ndim > 1 else segment
+        idx = int(np.argmin(np.abs(mono)))
+        return lo + idx
+
     def _on_canvas_release(self, event):
         if self.data is None:
             self.drag_mode = None
@@ -2579,12 +2608,14 @@ class LoopCrossfadeGUI:
                 # this is what lets you scrub right up to the loop-back
                 # point and hear the actual crossfaded wrap
                 preview_cursor = self._raw_to_preview_cursor(samp)
+                preview_cursor = self._nearest_zero_crossing(self.player.data, self.player.sr, preview_cursor)
                 self.player.set_cursor(preview_cursor)
             else:
                 # clicking outside the loop region: always operate on raw
                 # audio, so you can freely check surrounding context
                 self._exit_preview_mode()
-                self.player.set_cursor(samp)
+                snapped = self._nearest_zero_crossing(self.data, self.sr, samp)
+                self.player.set_cursor(snapped)
             self._show_click_flag(event.x, samp)
             self._redraw()
         elif self.drag_mode in ("start", "end", "new") and self.pre_drag_selection is not None:
@@ -3174,38 +3205,48 @@ class LoopCrossfadeGUI:
         ttk.Button(dlg, text="Done", command=lambda: on_close(), style="Accent.TButton").grid(
             row=len(rows), column=0, columnspan=2, pady=16, padx=10, sticky="ew")
 
-        root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
-        root_w = self.root.winfo_width()
-        x = root_x + root_w + 10
-        y = root_y
+        try:
+            root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+            root_w = self.root.winfo_width()
+            x = root_x + root_w + 10
+            y = root_y
 
-        # ---- from here down, this now EXACTLY mirrors open_stretch_dialog's
-        # order of operations (which positions correctly): measure, compute
-        # target x/y, geometry(), deferred re-apply, THEN minsize() last.
-        # The previous version called minsize() BEFORE geometry() -- a real,
-        # concrete ordering difference from the one dialog that's confirmed
-        # working, so this is a evidence-based change, not another guess. ----
-        dlg.update_idletasks()
-        required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
-        saved = self.window_sizes.get("shortcuts", {})
-        w, h = resolve_window_size(required_w, required_h, saved)
-        dlg.geometry(f"{w}x{h}+{x}+{y}")
-        dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))
-        dlg.minsize(required_w, required_h)
+            # ---- from here down, this now EXACTLY mirrors
+            # open_stretch_dialog's order of operations (which positions
+            # correctly): measure, compute target x/y, geometry(), deferred
+            # re-apply, THEN minsize() last. ----
+            dlg.update_idletasks()
+            required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+            saved = self.window_sizes.get("shortcuts", {})
+            w, h = resolve_window_size(required_w, required_h, saved)
+            dlg.geometry(f"{w}x{h}+{x}+{y}")
+            dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))
+            dlg.minsize(required_w, required_h)
 
-        # a custom Label inside this dialog has twice failed to actually
-        # become visible for reasons I haven't been able to pin down --
-        # switching to a plain messagebox instead: dead simple, a totally
-        # different Tk code path, much harder for it to silently fail
-        self.messagebox.showinfo(
-            "FermaLoop debug",
-            f"root window: pos=({root_x},{root_y}) width={root_w}\n"
-            f"(alt) winfo_x/y=({self.root.winfo_x()},{self.root.winfo_y()})\n"
-            f"computed target position: ({x},{y})\n"
-            f"dialog size: {w}x{h}\n"
-            f"screen size: {self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}\n\n"
-            f"Please screenshot or copy this exact text back."
-        )
+            # a custom Label inside this dialog has twice failed to actually
+            # become visible for reasons I haven't been able to pin down --
+            # switching to a plain messagebox instead: dead simple, a totally
+            # different Tk code path, much harder for it to silently fail
+            self.messagebox.showinfo(
+                "FermaLoop debug",
+                f"root window: pos=({root_x},{root_y}) width={root_w}\n"
+                f"(alt) winfo_x/y=({self.root.winfo_x()},{self.root.winfo_y()})\n"
+                f"computed target position: ({x},{y})\n"
+                f"dialog size: {w}x{h}\n"
+                f"screen size: {self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}\n\n"
+                f"Please screenshot or copy this exact text back."
+            )
+        except Exception as e:
+            # this dialog's positioning code has silently failed to have
+            # any visible effect through several previous fix attempts,
+            # including a debug label that never appeared -- if that was
+            # actually a swallowed exception rather than a rendering issue,
+            # THIS surfaces it explicitly instead of failing silently again
+            import traceback
+            self.messagebox.showerror(
+                "FermaLoop debug -- an error occurred while positioning this window",
+                f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+            )
 
         def on_close():
             save_shortcuts(self.shortcuts)
