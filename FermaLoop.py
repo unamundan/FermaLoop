@@ -3165,133 +3165,109 @@ class LoopCrossfadeGUI:
         return "-".join(parts)
 
     def open_shortcuts_dialog(self):
-        # unconditional, first-line diagnostic: appends every single call
-        # (regardless of what happens next) to two locations, so we can
-        # tell definitively whether this function is even being entered
-        import datetime
-        log_line = f"[{datetime.datetime.now()}] open_shortcuts_dialog() called. existing dialog ref: {getattr(self, '_shortcuts_dialog', 'MISSING_ATTR')}\n"
-        for log_path in (os.path.join(os.path.expanduser("~"), "fermaloop_entry_log.txt"),
-                          os.path.join(os.getcwd(), "fermaloop_entry_log.txt")):
+        # singleton: repeated clicks on the info icon were opening a brand
+        # new window every time with no check for one already being open
+        if getattr(self, "_shortcuts_dialog", None) is not None:
             try:
-                with open(log_path, "a") as f:
-                    f.write(log_line)
+                if self._shortcuts_dialog.winfo_exists():
+                    self._shortcuts_dialog.deiconify()
+                    self._shortcuts_dialog.lift()
+                    self._shortcuts_dialog.focus_force()
+                    return
             except Exception:
                 pass
-        try:
-            self.status_var.set(f"open_shortcuts_dialog() entered at {datetime.datetime.now().strftime('%H:%M:%S')}")
-        except Exception:
-            pass
+            self._shortcuts_dialog = None
 
-        # EVERYTHING below (the whole rest of the function -- widget
-        # creation, keybinding setup, positioning, all of it) is now
-        # wrapped in one broad try/except. The last diagnostic only
-        # covered the positioning code specifically; the entry log above
-        # confirmed this function IS being entered and the singleton
-        # early-return ISN'T the cause (ref was None), but the debug file
-        # that positioning code should have written never appeared either
-        # -- meaning whatever's failing is somewhere EARLIER, in the
-        # widget-creation code that was never wrapped in anything at all.
-        try:
-            # singleton: repeated clicks on the info icon were opening a
-            # brand new window every time with no check for one already open
-            if getattr(self, "_shortcuts_dialog", None) is not None:
-                try:
-                    if self._shortcuts_dialog.winfo_exists():
-                        self._shortcuts_dialog.deiconify()
-                        self._shortcuts_dialog.lift()
-                        self._shortcuts_dialog.focus_force()
-                        return
-                except Exception:
-                    pass
-                self._shortcuts_dialog = None
+        tk, ttk = self.tk, self.ttk
+        dlg = tk.Toplevel(self.root)
+        self._shortcuts_dialog = dlg
+        dlg.title("Keyboard Shortcuts")
+        dlg.configure(bg=BG)
+        dlg.transient(self.root)
 
-            tk, ttk = self.tk, self.ttk
-            dlg = tk.Toplevel(self.root)
-            self._shortcuts_dialog = dlg
-            dlg.title("Keyboard Shortcuts")
-            dlg.configure(bg=BG)
-            dlg.transient(self.root)
+        rows = {}
+        for i, (name, label) in enumerate(SHORTCUT_LABELS.items()):
+            ttk.Label(dlg, text=label, background=BG, foreground=FG).grid(row=i, column=0, sticky="w", padx=10, pady=6)
+            btn = ttk.Button(dlg, text=self.shortcuts.get(name, DEFAULT_SHORTCUTS[name]), width=14)
+            btn.grid(row=i, column=1, padx=10, pady=6)
+            rows[name] = btn
 
-            rows = {}
-            for i, (name, label) in enumerate(SHORTCUT_LABELS.items()):
-                ttk.Label(dlg, text=label, background=BG, foreground=FG).grid(row=i, column=0, sticky="w", padx=10, pady=6)
-                btn = ttk.Button(dlg, text=self.shortcuts.get(name, DEFAULT_SHORTCUTS[name]), width=14)
-                btn.grid(row=i, column=1, padx=10, pady=6)
-                rows[name] = btn
+        def start_listening(name, btn):
+            btn.configure(text="Press a key...")
 
-            def start_listening(name, btn):
-                btn.configure(text="Press a key...")
+            def capture(event):
+                key = self._event_to_key_string(event)
+                if key is None:
+                    return  # ignore bare modifier presses, keep listening
+                self.shortcuts[name] = key
+                btn.configure(text=key)
+                dlg.unbind("<KeyPress>")
+                self._rebind_all()
 
-                def capture(event):
-                    key = self._event_to_key_string(event)
-                    if key is None:
-                        return  # ignore bare modifier presses, keep listening
-                    self.shortcuts[name] = key
-                    btn.configure(text=key)
-                    dlg.unbind("<KeyPress>")
-                    self._rebind_all()
+            dlg.bind("<KeyPress>", capture)
 
-                dlg.bind("<KeyPress>", capture)
+        for name, btn in rows.items():
+            btn.configure(command=lambda n=name, b=btn: start_listening(n, b))
 
-            for name, btn in rows.items():
-                btn.configure(command=lambda n=name, b=btn: start_listening(n, b))
+        ttk.Button(dlg, text="Done", command=lambda: on_close(), style="Accent.TButton").grid(
+            row=len(rows), column=0, columnspan=2, pady=16, padx=10, sticky="ew")
 
-            ttk.Button(dlg, text="Done", command=lambda: on_close(), style="Accent.TButton").grid(
-                row=len(rows), column=0, columnspan=2, pady=16, padx=10, sticky="ew")
+        dlg.update_idletasks()
+        required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        saved = self.window_sizes.get("shortcuts", {})
+        w, h = resolve_window_size(required_w, required_h, saved)
+        dlg.minsize(required_w, required_h)
 
-            root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
-            root_w = self.root.winfo_width()
-            x = root_x + root_w + 10
-            y = root_y
+        # ---- docked position: attaches to the main window's right edge,
+        # and follows it live if the main window is dragged. Tracks the
+        # offset between the two windows (not an absolute screen spot,
+        # which wouldn't make sense once the main window has moved) -- so
+        # if you drag the dialog itself somewhere else, it keeps following
+        # from there instead of snapping back to the right edge. ----
+        offset = [self.root.winfo_width() + 10, 0]
+        programmatic_move = {"flag": False}
 
-            dlg.update_idletasks()
-            required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
-            saved = self.window_sizes.get("shortcuts", {})
-            w, h = resolve_window_size(required_w, required_h, saved)
+        def apply_geometry():
+            programmatic_move["flag"] = True
+            x = self.root.winfo_rootx() + offset[0]
+            y = self.root.winfo_rooty() + offset[1]
             dlg.geometry(f"{w}x{h}+{x}+{y}")
-            dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))
-            dlg.minsize(required_w, required_h)
 
-            debug_text = (
-                f"[{datetime.datetime.now()}] SUCCESS, reached the end of dialog setup.\n"
-                f"root window: pos=({root_x},{root_y}) width={root_w}\n"
-                f"(alt) winfo_x/y=({self.root.winfo_x()},{self.root.winfo_y()})\n"
-                f"computed target position: ({x},{y})\n"
-                f"dialog size: {w}x{h}\n"
-                f"screen size: {self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}\n"
-            )
+        def on_root_configure(event=None):
+            if dlg.winfo_exists():
+                apply_geometry()
 
-            def on_close():
-                save_shortcuts(self.shortcuts)
-                try:
-                    self.window_sizes["shortcuts"] = {
-                        "width": dlg.winfo_width(), "height": dlg.winfo_height(),
-                    }
-                    save_window_sizes(self.window_sizes)
-                except Exception:
-                    pass
-                self._shortcuts_dialog = None
-                dlg.destroy()
+        def on_dialog_configure(event=None):
+            if programmatic_move["flag"]:
+                programmatic_move["flag"] = False
+                return
+            # the user dragged the dialog itself -- adopt the new offset so
+            # it keeps following from wherever they put it, not snapping back
+            offset[0] = dlg.winfo_rootx() - self.root.winfo_rootx()
+            offset[1] = dlg.winfo_rooty() - self.root.winfo_rooty()
 
-            dlg.protocol("WM_DELETE_WINDOW", on_close)
+        apply_geometry()
+        dlg.after(20, apply_geometry)  # defensive re-apply against WM timing quirks
+        root_binding = self.root.bind("<Configure>", on_root_configure, add="+")
+        dlg.bind("<Configure>", on_dialog_configure, add="+")
 
-        except Exception as e:
-            import traceback
-            debug_text = (f"[{datetime.datetime.now()}] EXCEPTION somewhere in dialog setup "
-                          f"(widget creation, keybinding, or positioning):\n"
-                          f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
-
-        for log_path in (os.path.join(os.path.expanduser("~"), "fermaloop_debug.txt"),
-                          os.path.join(os.getcwd(), "fermaloop_debug.txt")):
+        def on_close():
+            save_shortcuts(self.shortcuts)
             try:
-                with open(log_path, "a") as f:
-                    f.write(debug_text + "\n" + "="*60 + "\n")
+                self.root.unbind("<Configure>", root_binding)
             except Exception:
                 pass
-        try:
-            self.status_var.set("Debug info written to fermaloop_debug.txt -- please open it and paste contents back")
-        except Exception:
-            pass
+            try:
+                self.window_sizes["shortcuts"] = {
+                    "width": dlg.winfo_width(), "height": dlg.winfo_height(),
+                }
+                save_window_sizes(self.window_sizes)
+            except Exception:
+                pass
+            self._shortcuts_dialog = None
+            dlg.destroy()
+
+        dlg.protocol("WM_DELETE_WINDOW", on_close)
 
     # ---------------- process & save ----------------
 
@@ -3346,14 +3322,21 @@ class LoopCrossfadeGUI:
 
     def _apply_saved_or_natural_size(self):
         """Sizes the window to fit everything on first paint (no manual
-        resize needed), while respecting a larger size the user may have
-        deliberately set last time the app was open."""
+        resize needed), while respecting a larger size -- and now also a
+        saved position -- the user may have deliberately set last time."""
         self.root.update_idletasks()
         required_w = self.root.winfo_reqwidth()
         required_h = self.root.winfo_reqheight()
         saved = self.window_sizes.get("main")
         w, h = resolve_window_size(required_w, required_h, saved)
-        self.root.geometry(f"{w}x{h}")
+        if saved and "x" in saved and "y" in saved:
+            try:
+                x, y = int(saved["x"]), int(saved["y"])
+                self.root.geometry(f"{w}x{h}+{x}+{y}")
+            except (TypeError, ValueError):
+                self.root.geometry(f"{w}x{h}")
+        else:
+            self.root.geometry(f"{w}x{h}")
         self.root.minsize(required_w, required_h)
 
     def _on_close(self):
@@ -3361,6 +3344,8 @@ class LoopCrossfadeGUI:
             self.window_sizes["main"] = {
                 "width": self.root.winfo_width(),
                 "height": self.root.winfo_height(),
+                "x": self.root.winfo_x(),
+                "y": self.root.winfo_y(),
             }
             save_window_sizes(self.window_sizes)
         except Exception:
