@@ -804,6 +804,8 @@ class AudioPlayer:
         self.play_end = 0
         self.play_loop = False
         self.on_natural_stop = None  # optional callback, called from GUI thread via `after`
+        self.declick_total = 1        # samples in the current declick fade-in ramp
+        self.declick_remaining = 0    # samples of that ramp still left to apply
 
     def load(self, data, sr):
         self.stop()
@@ -811,6 +813,7 @@ class AudioPlayer:
             data = data[:, None]
         self.data = np.ascontiguousarray(data.astype(np.float32))
         self.sr = sr
+        self.declick_total = max(1, int(sr * 0.008))  # 8ms fade-in, applied after any jump
         with self.lock:
             self.sel_start, self.sel_end, self.cursor = 0, len(self.data), 0
             self.play_start, self.play_end = 0, len(self.data)
@@ -855,6 +858,11 @@ class AudioPlayer:
             self.cursor = max(0, min(sample, len(self.data)))
             if self.playing:
                 self._apply_bounds_from_cursor()
+                # clicking to a new position while playing creates a sudden
+                # amplitude discontinuity at the jump (the waveform doesn't
+                # connect smoothly to wherever it was before) -- that's what
+                # causes the audible pop. A very short fade-in smooths it out.
+                self.declick_remaining = self.declick_total
 
     def set_loop(self, value):
         self.loop = bool(value)
@@ -882,6 +890,17 @@ class AudioPlayer:
             if chunk.shape[1] != ch:
                 chunk = np.tile(chunk[:, :1], (1, ch)) if chunk.shape[1] == 1 else chunk[:, :ch]
             outdata[:n] = chunk
+            if self.declick_remaining > 0:
+                # only applied here (the jump-origin chunk) -- deliberately
+                # NOT applied to the loop-wrap continuation below, since a
+                # raw/un-crossfaded loop's seam click is something the user
+                # explicitly wants to still hear when previewing it
+                ramp_n = min(n, self.declick_remaining)
+                start_gain = 1.0 - self.declick_remaining / self.declick_total
+                end_gain = 1.0 - (self.declick_remaining - ramp_n) / self.declick_total
+                gains = np.linspace(start_gain, end_gain, ramp_n, endpoint=False).reshape(-1, 1)
+                outdata[:ramp_n] *= gains
+                self.declick_remaining -= ramp_n
             self.cursor += n
             if n < frames:
                 if self.play_loop:
@@ -903,6 +922,12 @@ class AudioPlayer:
             return
         with self.lock:
             self._apply_bounds_from_cursor()
+            # smooths the start of playback the same way set_cursor() does --
+            # covers both a fresh Play press and a restart triggered by
+            # reprocessing (e.g. changing the manual crossfade value while
+            # auditioning stops/reloads/replays, which is its own kind of
+            # jump and had the same audible-pop problem)
+            self.declick_remaining = self.declick_total
         channels = self.data.shape[1]
         self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
                                         callback=self._callback, dtype="float32")
@@ -2065,20 +2090,38 @@ class LoopCrossfadeGUI:
 
     # ---------------- file loading ----------------
 
+    def _initial_browse_dir(self):
+        """Best starting folder for the Browse dialogs: prefer the
+        currently-loaded file's folder, then the current Save-as folder,
+        so Browse doesn't dump you in the generic default (Documents on
+        Windows) once you're already working with a file somewhere else."""
+        for path in (self.loaded_path, self.out_path_var.get(), self.in_path_var.get()):
+            if path:
+                d = os.path.dirname(path)
+                if d and os.path.isdir(d):
+                    return d
+        return None
+
     def choose_input(self):
+        initial_dir = self._initial_browse_dir()
+        kwargs = {"initialdir": initial_dir} if initial_dir else {}
         path = self.filedialog.askopenfilename(
             title="Choose audio file",
             filetypes=[("Audio files", "*.wav *.aif *.aiff *.mp3 *.mp4 *.m4a *.flac"), ("All files", "*.*")],
+            **kwargs,
         )
         if path:
             self.load_file(path)
 
     def choose_output(self):
         ext = FORMAT_EXT.get(self.format_var.get(), ".flac")
+        initial_dir = self._initial_browse_dir()
+        kwargs = {"initialdir": initial_dir} if initial_dir else {}
         path = self.filedialog.asksaveasfilename(
             title="Save processed file as", defaultextension=ext,
             filetypes=[("FLAC", "*.flac"), ("MP4 (Apple Lossless)", "*.mp4"), ("MP3", "*.mp3"),
                        ("WAV", "*.wav"), ("AIFF", "*.aiff"), ("M4A", "*.m4a")],
+            **kwargs,
         )
         if path:
             # Tk's file dialogs (built on Tcl, which uses forward slashes
@@ -3044,24 +3087,37 @@ class LoopCrossfadeGUI:
         dlg.minsize(required_w, required_h)
 
         # ---- position: docks to the main window's right edge, computed
-        # fresh every time the dialog opens. Deliberately NOT persisted or
-        # continuously re-applied while dragging -- that fancier "follows
-        # the main window live" version turned out unreliable in practice
-        # (in one case, a one-time window-manager placement quirk got
-        # misread as "the user dragged it here" and permanently corrupted
-        # the saved position, which is likely why the previous version kept
-        # opening in the wrong spot no matter what). This simpler, one-shot
-        # version is far less likely to end up in a bad state: it always
-        # computes fresh from wherever the main window is *right now*, and
-        # you're still free to drag the dialog anywhere you like once open
-        # -- it just won't try to remember or re-follow after that.
-        x = self.root.winfo_x() + self.root.winfo_width() + 10
-        y = self.root.winfo_y()
+        # fresh every time the dialog opens (no persistence -- see below).
+        #
+        # NOTE: this is the third attempt at this and it's still landing in
+        # the wrong place, which rules out my working theory from the last
+        # attempt (a corrupted persisted offset) since that version had NO
+        # persistence at all and still failed. That means either winfo_x()/
+        # winfo_y() are returning unexpected values on your system, or the
+        # window manager is ignoring the geometry request outright -- and I
+        # have no way to test real Tk window behavior on Windows from here,
+        # so a fourth blind guess isn't a responsible use of your time.
+        # Trying winfo_rootx()/rooty() instead (a genuinely different Tk
+        # API, not just a reworded version of the same call), AND printing
+        # the actual numbers being computed into the dialog itself -- if
+        # it's STILL wrong, please tell me exactly what that debug line
+        # says. That tells us definitively whether the calculation itself
+        # is wrong (fixable) or whether the OS is overriding a correct
+        # request outright (would need a different strategy entirely,
+        # like giving up on auto-positioning and just remembering the
+        # LAST place you manually dragged it to).
+        root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        root_w = self.root.winfo_width()
+        x = root_x + root_w + 10
+        y = root_y
         dlg.geometry(f"{w}x{h}+{x}+{y}")
-        # re-apply once more shortly after showing -- some window managers
-        # (notably on Windows) can silently override an initial geometry
-        # request before the window is fully mapped
         dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))
+
+        debug_text = (f"debug: root=({root_x},{root_y}) w={root_w}  ->  target=({x},{y})  "
+                      f"[also winfo_x/y=({self.root.winfo_x()},{self.root.winfo_y()})]")
+        ttk.Label(dlg, text=debug_text, background=BG, foreground=MUTED,
+                  font=("Segoe UI", 7)).grid(row=len(rows) + 1, column=0, columnspan=2,
+                                              sticky="ew", padx=10, pady=(0, 8))
 
         def on_close():
             save_shortcuts(self.shortcuts)
