@@ -1960,6 +1960,7 @@ class LoopCrossfadeGUI:
         in_entry = RoundedEntry(row, self.in_path_var, BG, FIELD_BG, FG, BORDER)
         in_entry.pack(side="left", fill="x", expand=True, padx=6)
         ToolTip(in_entry.frame, "Path to the audio file to load")
+        self._defocus_on_return(in_entry.entry)
         btn_browse_in = ttk.Button(row, text="Browse", command=self.choose_input, takefocus=0)
         btn_browse_in.pack(side="left")
         ToolTip(btn_browse_in, "Choose an audio file from disk")
@@ -1969,6 +1970,7 @@ class LoopCrossfadeGUI:
         out_entry = RoundedEntry(row, self.out_path_var, BG, FIELD_BG, FG, BORDER)
         out_entry.pack(side="left", fill="x", expand=True, padx=6)
         ToolTip(out_entry.frame, "Where the processed loop will be saved")
+        self._defocus_on_return(out_entry.entry)
         btn_browse_out = ttk.Button(row, text="Browse", command=self.choose_output, takefocus=0)
         btn_browse_out.pack(side="left")
         ToolTip(btn_browse_out, "Choose where to save the processed file")
@@ -3133,10 +3135,29 @@ class LoopCrossfadeGUI:
         for name, fn in self._action_map().items():
             self._bind_one(self.shortcuts.get(name, DEFAULT_SHORTCUTS[name]), fn)
 
+    def _text_entry_focused(self):
+        """True if the currently focused widget is a real tk.Entry (the
+        widget every RoundedEntry wraps internally). Global shortcuts are
+        bound directly to the root window with no built-in focus
+        awareness, so without this check, typing/copying/cutting text in
+        ANY entry field also fires whatever global shortcut happens to
+        share that key -- e.g. Ctrl+C (Copy) also matched the "c" (Crop)
+        shortcut, and Ctrl+X (Cut) also matched "x" (Stretch), because Tk
+        only checks modifiers a binding pattern explicitly names; a plain
+        "c"/"x" pattern matches regardless of whether Ctrl is ALSO held."""
+        try:
+            return isinstance(self.root.focus_get(), self.tk.Entry)
+        except Exception:
+            return False
+
     def _bind_one(self, key, fn):
+        def guarded(event=None):
+            if self._text_entry_focused():
+                return  # let the entry handle typing/copy/cut/paste normally
+            fn()
         seq = f"<{key}>" if len(key) > 1 else f"<KeyPress-{key}>"
         try:
-            self.root.bind(seq, lambda e: fn())
+            self.root.bind(seq, guarded)
         except self.tk.TclError:
             pass  # an invalid/unsupported key sequence shouldn't crash the app
 
