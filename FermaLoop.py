@@ -651,6 +651,14 @@ def process_file(in_path, out_path, xfade_seconds=None, curve="equal_power",
 # Keyboard shortcuts (user-remappable, persisted to a small JSON file)
 # ---------------------------------------------------------------------------
 
+IS_MACOS = sys.platform == "darwin"
+# macOS convention is Command, not Control, for these -- Tk's binding
+# syntax for the Cmd key is "Command" (e.g. <Command-z>). The displayed
+# label in the Shortcuts window also switches to the macOS glyph (see
+# _display_key_label) so a remapped shortcut still reads naturally there.
+_UNDO_KEY = "Command-z" if IS_MACOS else "Control-z"
+_REDO_KEY = "Shift-Command-z" if IS_MACOS else "Shift-Control-z"
+
 DEFAULT_SHORTCUTS = {
     "play_pause": "space",
     "stop": "s",
@@ -658,8 +666,8 @@ DEFAULT_SHORTCUTS = {
     "loop_toggle": "l",
     "crop": "c",
     "audition": "a",
-    "undo": "Control-z",
-    "redo": "Shift-Control-z",
+    "undo": _UNDO_KEY,
+    "redo": _REDO_KEY,
     "zoom_in": "equal",
     "zoom_out": "minus",
     "zoom_fit": "0",
@@ -680,6 +688,39 @@ SHORTCUT_LABELS = {
     "zoom_fit": "Zoom to Fit",
     "stretch": "PaulXStretch...",
 }
+
+_MAC_MOD_SYMBOLS = {"Control": "\u2303", "Command": "\u2318", "Cmd": "\u2318",
+                     "Shift": "\u21e7", "Alt": "\u2325", "Option": "\u2325"}
+_OTHER_MOD_NAMES = {"Control": "Ctrl", "Command": "Cmd", "Shift": "Shift", "Alt": "Alt"}
+_KEY_DISPLAY_NAMES = {"space": "Space", "equal": "=", "minus": "-", "Home": "Home",
+                       "plus": "+", "Escape": "Esc", "Return": "Return"}
+_MOD_DISPLAY_ORDER = ["Control", "Alt", "Option", "Shift", "Command", "Cmd"]
+
+
+def format_key_for_display(key):
+    """Formats a raw Tk key-binding string (e.g. 'Shift-Command-z') for
+    on-screen display -- macOS gets its native modifier symbols
+    (stacked, no separator, matching how macOS itself shows shortcuts
+    e.g. "^\u2318Z"), other platforms get a readable 'Ctrl+Shift+Z' style
+    string. Modifiers are always shown in a fixed, conventional order
+    regardless of how they happen to be ordered in the raw binding
+    string, so the display is consistent no matter how a shortcut was
+    remapped. Used both in the Shortcuts window and in tooltip hints, so
+    a remapped shortcut displays correctly everywhere it's referenced."""
+    if not key:
+        return key
+    parts = key.split("-")
+    base = parts[-1]
+    mods = parts[:-1]
+    mods = sorted(mods, key=lambda m: _MOD_DISPLAY_ORDER.index(m) if m in _MOD_DISPLAY_ORDER else 99)
+    base_display = _KEY_DISPLAY_NAMES.get(base, base.upper() if len(base) == 1 else base.capitalize())
+    if IS_MACOS:
+        mod_str = "".join(_MAC_MOD_SYMBOLS.get(m, m) for m in mods)
+        return f"{mod_str}{base_display}"
+    else:
+        mod_str = "+".join(_OTHER_MOD_NAMES.get(m, m) for m in mods)
+        return f"{mod_str}+{base_display}" if mod_str else base_display
+
 
 SHORTCUTS_PATH = os.path.join(os.path.expanduser("~"), ".loop_crossfade_shortcuts.json")
 
@@ -1094,6 +1135,12 @@ AUDITION_ON_HOVER = "#4fdb9c"  # read the same as the (blue) Loop toggle or defa
 BORDER = "#37393e"
 WAVEFORM_COLOR = "#5b8cff"
 ZERO_LINE_COLOR = "#9a9da3"  # matches MUTED -- verified 5.43:1 contrast against the panel (WCAG-checked, not eyeballed); a literally darker grey actually reads WORSE here, since it blends toward the panel background instead of standing out from it
+
+TOOLTIP_BG = "#111214"       # near-black, existing tooltip background
+TOOLTIP_BORDER = "#2a2c30"
+KEYCAP_BG = "#0a0b0c"        # darker than the tooltip itself -- a recessed "simulated key" look
+KEYCAP_BORDER = "#2a2c30"
+KEYCAP_FG = "#c8cad0"        # light enough to read clearly against the darker keycap
 SELECTION_COLOR = "#3a4a6b"
 PLAYHEAD_COLOR = "#ff5c5c"
 HANDLE_COLOR = "#e6e6e8"
@@ -1383,7 +1430,7 @@ class RoundedEntry:
         self.bg, self.field_bg, self.border, self.fg = bg, field_bg, border, fg
         self.fixed_width = width
         self.frame = tk.Frame(parent, bg=bg)
-        canvas_kwargs = {"height": height, "bg": bg, "highlightthickness": 0}
+        canvas_kwargs = {"height": height, "bg": bg, "highlightthickness": 0, "takefocus": 0}
         if width is not None:
             canvas_kwargs["width"] = width
         self.canvas = tk.Canvas(self.frame, **canvas_kwargs)
@@ -1439,7 +1486,7 @@ class RoundedCheckbutton:
         self._photo = None
 
         self.frame = tk.Frame(parent, bg=bg)
-        self.canvas = tk.Canvas(self.frame, width=box, height=box, bg=bg, highlightthickness=0)
+        self.canvas = tk.Canvas(self.frame, width=box, height=box, bg=bg, highlightthickness=0, takefocus=0)
         self.canvas.pack(side="left")
         self.label = tk.Label(self.frame, text=text, bg=bg, fg=fg, font=("Segoe UI", 10), justify="left")
         self.label.pack(side="left", padx=(6, 0))
@@ -1496,7 +1543,7 @@ class RoundedRadio:
         self._photo = None
 
         self.frame = tk.Frame(parent, bg=bg)
-        self.canvas = tk.Canvas(self.frame, width=size, height=size, bg=bg, highlightthickness=0)
+        self.canvas = tk.Canvas(self.frame, width=size, height=size, bg=bg, highlightthickness=0, takefocus=0)
         self.canvas.pack(side="left")
         self.label = tk.Label(self.frame, text=text, bg=bg, fg=fg, font=("Segoe UI", 10))
         self.label.pack(side="left", padx=(6, 0))
@@ -1549,7 +1596,7 @@ class RoundedDropdown:
         self.popup = None
 
         self.frame = tk.Frame(parent, bg=bg)
-        self.canvas = tk.Canvas(self.frame, width=width, height=height, bg=bg, highlightthickness=0)
+        self.canvas = tk.Canvas(self.frame, width=width, height=height, bg=bg, highlightthickness=0, takefocus=0)
         self.canvas.pack()
         self._bg_photo = None
         self.canvas.bind("<Button-1>", self._toggle_popup)
@@ -1627,7 +1674,7 @@ class RoundedSlider:
         self.command = command
 
         self.frame = tk.Frame(parent, bg=bg)
-        self.canvas = tk.Canvas(self.frame, width=width, height=height, bg=bg, highlightthickness=0)
+        self.canvas = tk.Canvas(self.frame, width=width, height=height, bg=bg, highlightthickness=0, takefocus=0)
         self.canvas.pack()
         self._bg_photo = None
         self.canvas.bind("<Button-1>", self._on_interact)
@@ -1682,11 +1729,12 @@ class ToolTip:
     text-only icon buttons (where there's no visible label to explain
     what they do) as well as ordinary fields/buttons."""
 
-    def __init__(self, widget, text, delay=500):
+    def __init__(self, widget, text=None, delay=500):
         import tkinter as tk
         self.tk = tk
         self.widget = widget
         self.text = text
+        self.rich = None
         self.delay = delay
         self.tip = None
         self.after_id = None
@@ -1706,25 +1754,81 @@ class ToolTip:
                 pass
             self.after_id = None
 
+    def set_text(self, text):
+        """Updates the tooltip's text in place -- used when a keyboard
+        shortcut is remapped, so an already-built tooltip reflects the
+        new binding without needing to be recreated."""
+        self.text = text
+        self.rich = None
+
+    def set_rich(self, name, key, description):
+        """Switches this tooltip to the richer transport-button style:
+        bold NAME, a simulated-keycap badge for the shortcut, a
+        separator, then the description -- instead of one plain line."""
+        self.rich = (name, key, description)
+        self.text = None
+
     def _show(self):
-        if self.tip is not None or not self.text:
+        if self.tip is not None or (not self.text and not self.rich):
             return
         try:
             x = self.widget.winfo_rootx() + 12
             y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
         except Exception:
             return
-        self.tip = self.tk.Toplevel(self.widget)
+        tk = self.tk
+        self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
         try:
             self.tip.wm_attributes("-topmost", True)
         except Exception:
             pass
         self.tip.wm_geometry(f"+{x}+{y}")
-        label = self.tk.Label(self.tip, text=self.text, bg="#111214", fg="#e6e6e8",
-                               font=("Segoe UI", 9), padx=8, pady=4,
-                               relief="solid", borderwidth=1)
-        label.pack()
+
+        if self.rich:
+            name, key, description = self.rich
+            frame = tk.Frame(self.tip, bg=TOOLTIP_BG, relief="solid", borderwidth=1,
+                              highlightbackground=TOOLTIP_BORDER)
+            frame.pack()
+            header = tk.Frame(frame, bg=TOOLTIP_BG)
+            header.pack(fill="x", padx=9, pady=(7, 5))
+            tk.Label(header, text=name.upper(), bg=TOOLTIP_BG, fg=FG,
+                     font=("Segoe UI", 9, "bold")).pack(side="left")
+            if key:
+                self._render_keycap(header, key).pack(side="left", padx=(8, 0))
+            tk.Frame(frame, height=1, bg=TOOLTIP_BORDER).pack(fill="x", padx=9)
+            tk.Label(frame, text=description, bg=TOOLTIP_BG, fg=MUTED,
+                     font=("Segoe UI", 9), wraplength=260, justify="left").pack(
+                     anchor="w", fill="x", padx=9, pady=(5, 7))
+        else:
+            label = tk.Label(self.tip, text=self.text, bg=TOOLTIP_BG, fg=FG,
+                              font=("Segoe UI", 9), padx=8, pady=4,
+                              relief="solid", borderwidth=1)
+            label.pack()
+
+    def _render_keycap(self, parent, key_text):
+        """A small rounded, recessed 'keycap' badge for a shortcut --
+        darker than the tooltip's own background, with light text, so it
+        reads as a distinct simulated key rather than plain text."""
+        tk = self.tk
+        try:
+            import tkinter.font as tkfont
+            f = tkfont.Font(family="Segoe UI", size=8, weight="bold")
+            text_w = f.measure(key_text)
+        except Exception:
+            text_w = len(key_text) * 7
+        w = max(20, text_w + 14)
+        h = 18
+        canvas = tk.Canvas(parent, width=w, height=h, bg=TOOLTIP_BG, highlightthickness=0, takefocus=0)
+        if PIL_AVAILABLE:
+            img = render_rounded_box_image(w, h, 5, KEYCAP_BG, KEYCAP_BORDER)
+            photo = ImageTk.PhotoImage(img)
+            canvas._keycap_photo = photo  # keep a reference or Tk garbage-collects it
+            canvas.create_image(0, 0, anchor="nw", image=photo)
+        else:
+            canvas.create_rectangle(0, 0, w, h, fill=KEYCAP_BG, outline=KEYCAP_BORDER)
+        canvas.create_text(w / 2, h / 2, text=key_text, fill=KEYCAP_FG, font=("Segoe UI", 8, "bold"))
+        return canvas
 
     def _hide(self, event=None):
         self._cancel()
@@ -2042,6 +2146,15 @@ class LoopCrossfadeGUI:
         entry_widget.bind("<Return>", lambda e: self.root.focus_set())
         entry_widget.bind("<KP_Enter>", lambda e: self.root.focus_set())
 
+    def _transport_tooltip(self, action_name, display_name, description):
+        """Looks up the CURRENT shortcut (respecting remaps) for
+        action_name and returns (display_name, key_display, description)
+        -- the three pieces ToolTip.set_rich() renders as a bold name, a
+        simulated keycap badge, and the description underneath."""
+        key = self.shortcuts.get(action_name, DEFAULT_SHORTCUTS.get(action_name, ""))
+        key_display = format_key_for_display(key) if key else ""
+        return (display_name, key_display, description)
+
     def _make_icon_button(self, parent, icon_name, tooltip_text, command, size=None, style="Icon.TButton"):
         """Icon-only button with a hover tooltip -- falls back to a short
         text label if Pillow isn't installed, so the button never ends up
@@ -2052,13 +2165,24 @@ class LoopCrossfadeGUI:
         this, clicking Play then pressing Space called on_play_pause()
         TWICE for one keypress (once from the button's own focus-triggered
         invoke, once from the global shortcut), which looked like a brief
-        stop-and-restart or an unexpected jump."""
+        stop-and-restart or an unexpected jump.
+
+        tooltip_text may be a plain string (simple one-line hint) or a
+        (name, key, description) tuple, in which case the tooltip renders
+        in the richer transport-button style via ToolTip.set_rich()."""
+        is_rich = isinstance(tooltip_text, tuple)
+        fallback_text = tooltip_text[0] if is_rich else tooltip_text
         photo = self._get_icon(icon_name, size)
         if photo is not None:
             btn = self.ttk.Button(parent, image=photo, style=style, command=command, takefocus=0)
         else:
-            btn = self.ttk.Button(parent, text=tooltip_text, style=style, command=command, takefocus=0)
-        self._last_tooltip = ToolTip(btn, tooltip_text)
+            btn = self.ttk.Button(parent, text=fallback_text, style=style, command=command, takefocus=0)
+        if is_rich:
+            tip = ToolTip(btn)
+            tip.set_rich(*tooltip_text)
+            self._last_tooltip = tip
+        else:
+            self._last_tooltip = ToolTip(btn, tooltip_text)
         return btn
 
     def _set_play_pause_icon(self, playing):
@@ -2180,7 +2304,7 @@ class LoopCrossfadeGUI:
         canvas_frame = ttk.Frame(outer, style="Panel.TFrame")
         canvas_frame.pack(fill="x", pady=(0, 4))
         self.canvas = tk.Canvas(canvas_frame, height=self.canvas_height, bg=PANEL,
-                                 highlightthickness=0)
+                                 highlightthickness=0, takefocus=0)
         self.canvas.pack(fill="x", expand=True, padx=4, pady=4)
         self.canvas.bind("<Configure>", self._on_canvas_resize)
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
@@ -2202,34 +2326,44 @@ class LoopCrossfadeGUI:
         transport_icons = ttk.Frame(transport)
         transport_icons.pack(expand=True)  # centers the icon group horizontally
 
-        self.btn_play = self._make_icon_button(transport_icons, "play", "Play", self.on_play_pause, size=self.ICON_SIZE)
+        self.btn_play = self._make_icon_button(transport_icons, "play",
+            self._transport_tooltip("play_pause", "Play / Pause", "Activate / freeze playback"),
+            self.on_play_pause, size=self.ICON_SIZE)
         self.btn_play.pack(side="left", padx=(0, 4))
         self._play_tooltip = self._last_tooltip
 
-        self.btn_stop = self._make_icon_button(transport_icons, "stop", "Stop", self.on_stop, size=self.ICON_SIZE)
+        self.btn_stop = self._make_icon_button(transport_icons, "stop",
+            self._transport_tooltip("stop", "Stop", "Stop playback"),
+            self.on_stop, size=self.ICON_SIZE)
         self.btn_stop.pack(side="left", padx=4)
+        self._stop_tooltip = self._last_tooltip
 
         self.btn_repeat = self._make_icon_button(transport_icons, "repeat",
-                                                   "Repeat (loop the raw selection -- no crossfade, "
-                                                   "you'll hear a click at the seam)",
-                                                   self.on_repeat_toggle, size=self.ICON_SIZE)
+            self._transport_tooltip("loop_toggle", "Repeat", "Loop raw selection (no crossfade -- "
+                                     "you'll hear a click at the seam)"),
+            self.on_repeat_toggle, size=self.ICON_SIZE)
         self.btn_repeat.pack(side="left", padx=4)
+        self._repeat_tooltip = self._last_tooltip
 
         self.btn_loop = self._make_icon_button(transport_icons, "loop",
-                                                 "Audition (Play processed/crossfaded section, looped.)",
-                                                 self.on_loop_preview, size=self.ICON_SIZE)
+            self._transport_tooltip("audition", "Loop", "Preview processed crossfade, looped"),
+            self.on_loop_preview, size=self.ICON_SIZE)
         self.btn_loop.pack(side="left", padx=(16, 4))
+        self._loop_tooltip = self._last_tooltip
 
         self.btn_crop = self._make_icon_button(transport_icons, "crop",
-                                                 "Crop to Selection. Crop is only needed once you want to "
-                                                 "commit the working range.",
-                                                 self.on_crop, size=self.ICON_SIZE)
+            self._transport_tooltip("crop", "Crop Selected", "Remove unselected audio, "
+                                     "committing the working range"),
+            self.on_crop, size=self.ICON_SIZE)
         self.btn_crop.pack(side="left", padx=4)
+        self._crop_tooltip = self._last_tooltip
 
         btn_stretch = self._make_icon_button(transport_icons, "stretch",
-                                              "PaulXStretch: extreme time-stretch the current selection",
-                                              self.open_stretch_dialog, size=self.ICON_SIZE)
+            self._transport_tooltip("stretch", "Stretch", "Open PaulXStretch for extreme "
+                                     "time-stretching of the current selection"),
+            self.open_stretch_dialog, size=self.ICON_SIZE)
         btn_stretch.pack(side="left", padx=4)
+        self._stretch_tooltip = self._last_tooltip
 
         ttk.Frame(outer, height=1, style="Panel.TFrame").pack(fill="x", pady=14)
 
@@ -2693,7 +2827,23 @@ class LoopCrossfadeGUI:
 
         sx = self._sample_to_x(self.sel_start, w)
         ex = self._sample_to_x(self.sel_end, w)
-        self.canvas.create_rectangle(sx, 0, ex, h, fill=SELECTION_COLOR, outline="", stipple="gray50")
+        # PIL-rendered RGBA image with real alpha, NOT stipple -- Tk's
+        # stipple fills are explicitly documented as unsupported outside
+        # X11 ("stipples are not well supported on platforms that do not
+        # use X11 as their drawing API" -- the Tk manual itself). On
+        # macOS's Aqua, this rendered as a fully OPAQUE fill instead of a
+        # semi-transparent highlight, completely hiding the waveform
+        # underneath the selected region. A real RGBA image with alpha
+        # composites correctly on every platform, since Tk's PhotoImage/
+        # Canvas image rendering handles alpha natively rather than
+        # through this legacy, X11-specific mechanism.
+        sel_w = max(1, int(ex - sx))
+        if PIL_AVAILABLE and sel_w > 0:
+            sel_img = Image.new("RGBA", (sel_w, max(1, int(h))), _hex_to_rgb(SELECTION_COLOR) + (110,))
+            self._sel_photo = ImageTk.PhotoImage(sel_img)  # keep a reference or Tk garbage-collects it
+            self.canvas.create_image(sx, 0, anchor="nw", image=self._sel_photo)
+        else:
+            self.canvas.create_rectangle(sx, 0, ex, h, fill=SELECTION_COLOR, outline="", stipple="gray50")
         self.canvas.create_line(sx, 0, sx, h, fill=HANDLE_COLOR, width=2, tags="handle_start")
         self.canvas.create_line(ex, 0, ex, h, fill=HANDLE_COLOR, width=2, tags="handle_end")
 
@@ -3525,7 +3675,13 @@ class LoopCrossfadeGUI:
             fn()
         seq = f"<{key}>" if len(key) > 1 else f"<KeyPress-{key}>"
         try:
-            self.root.bind(seq, guarded)
+            # bind_all rather than binding just the root window: more
+            # robust against focus ambiguity across platforms (reported
+            # as sporadic on macOS) -- bind_all intercepts the keypress
+            # regardless of which specific widget currently has focus,
+            # rather than depending on the root window itself being what
+            # the OS currently considers focused.
+            self.root.bind_all(seq, guarded)
         except self.tk.TclError:
             pass  # an invalid/unsupported key sequence shouldn't crash the app
 
@@ -3533,22 +3689,59 @@ class LoopCrossfadeGUI:
         for name, fn in self._action_map().items():
             key = self.shortcuts.get(name, DEFAULT_SHORTCUTS[name])
             self._bind_one(key, fn)
+        self._refresh_transport_tooltips()
+
+    def _refresh_transport_tooltips(self):
+        """Updates every transport button's hover hint to reflect the
+        current shortcut bindings -- called after a remap so a tooltip
+        never shows a stale key."""
+        tooltip_specs = [
+            ("_play_tooltip", "play_pause", "Play / Pause", "Activate / freeze playback"),
+            ("_stop_tooltip", "stop", "Stop", "Stop playback"),
+            ("_repeat_tooltip", "loop_toggle", "Repeat",
+             "Loop raw selection (no crossfade -- you'll hear a click at the seam)"),
+            ("_loop_tooltip", "audition", "Loop", "Preview processed crossfade, looped"),
+            ("_crop_tooltip", "crop", "Crop Selected",
+             "Remove unselected audio, committing the working range"),
+            ("_stretch_tooltip", "stretch", "Stretch",
+             "Open PaulXStretch for extreme time-stretching of the current selection"),
+        ]
+        for attr, action_name, display_name, description in tooltip_specs:
+            tooltip = getattr(self, attr, None)
+            if tooltip is not None:
+                tooltip.set_rich(*self._transport_tooltip(action_name, display_name, description))
 
     @staticmethod
     def _event_to_key_string(event):
-        """Builds a Tkinter-bindable key string (e.g. 'Control-z') from a
-        KeyPress event, including modifiers -- needed so remapping Undo/
-        Redo to Ctrl+<key> combos actually works, not just the bare key."""
+        """Builds a Tkinter-bindable key string (e.g. 'Control-z', or on
+        macOS 'Command-z') from a KeyPress event, including modifiers --
+        needed so remapping Undo/Redo (or any shortcut) to a modifier
+        combo actually works, not just the bare key.
+
+        On macOS, Tk's Aqua port maps the Command key to what's
+        internally still called "Mod1" -- the SAME state bit (0x0008)
+        other platforms use for Alt. Command is by far the more
+        commonly intended modifier for application shortcuts on Mac
+        (Option/Alt is rarely used that way), so that bit is labeled
+        "Command" there instead of "Alt". This is based on well-
+        documented Tk-on-Aqua behavior; I can't personally verify it on
+        a real Mac from here, so if a remapped Command-based shortcut
+        doesn't take, that assumption is the first thing worth checking."""
         parts = []
         state = event.state
         if state & 0x0004:
             parts.append("Control")
         if state & 0x0001:
             parts.append("Shift")
-        if state & 0x0008 or state & 0x20000:
-            parts.append("Alt")
+        if IS_MACOS:
+            if state & 0x0008:
+                parts.append("Command")
+        else:
+            if state & 0x0008 or state & 0x20000:
+                parts.append("Alt")
         keysym = event.keysym
-        if keysym in ("Control_L", "Control_R", "Shift_L", "Shift_R", "Alt_L", "Alt_R"):
+        if keysym in ("Control_L", "Control_R", "Shift_L", "Shift_R", "Alt_L", "Alt_R",
+                      "Meta_L", "Meta_R", "Super_L", "Super_R"):
             return None  # a bare modifier key press isn't a usable shortcut on its own
         parts.append(keysym)
         return "-".join(parts)
@@ -3605,7 +3798,8 @@ class LoopCrossfadeGUI:
         for i, (name, label) in enumerate(SHORTCUT_LABELS.items()):
             ttk.Label(shortcuts_frame, text=label, background=BG, foreground=FG).grid(
                 row=i, column=0, sticky="w", pady=3)
-            btn = ttk.Button(shortcuts_frame, text=self.shortcuts.get(name, DEFAULT_SHORTCUTS[name]), width=14)
+            raw_key = self.shortcuts.get(name, DEFAULT_SHORTCUTS[name])
+            btn = ttk.Button(shortcuts_frame, text=format_key_for_display(raw_key), width=14)
             btn.grid(row=i, column=1, padx=(10, 0), pady=3)
             rows[name] = btn
 
@@ -3617,7 +3811,7 @@ class LoopCrossfadeGUI:
                 if key is None:
                     return  # ignore bare modifier presses, keep listening
                 self.shortcuts[name] = key
-                btn.configure(text=key)
+                btn.configure(text=format_key_for_display(key))
                 dlg.unbind("<KeyPress>")
                 self._rebind_all()
 
