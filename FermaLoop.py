@@ -650,8 +650,8 @@ SHORTCUT_LABELS = {
     "audition": "Loop (crossfade preview)",
     "undo": "Undo",
     "redo": "Redo",
-    "zoom_in": "Zoom In",
-    "zoom_out": "Zoom Out",
+    "zoom_in": "Zoom In (Scroll Up)",
+    "zoom_out": "Zoom Out (Scroll Down)",
     "zoom_fit": "Zoom to Fit",
     "stretch": "PaulXStretch...",
 }
@@ -1693,7 +1693,7 @@ class LoopCrossfadeGUI:
         self.snap_var = tk.BooleanVar(value=False)
         self.window_var = tk.StringVar(value="0.25")
         self.repeat_var = tk.BooleanVar(value=False)
-        self.status_var = tk.StringVar(value="Drag an audio file onto this window, or click Browse.")
+        self.status_var = tk.StringVar(value="")
         self.time_var = tk.StringVar(value="00:00.000")
         self.selection_duration_var = tk.StringVar(value="Selection: --")
         self._click_flag = None       # (x_pixel, time_str) or None
@@ -1726,6 +1726,7 @@ class LoopCrossfadeGUI:
         style.configure("Panel.TFrame", background=PANEL)
         style.configure("TLabel", background=BG, foreground=FG, font=("Segoe UI", 10))
         style.configure("Muted.TLabel", background=BG, foreground=MUTED, font=("Segoe UI", 9))
+        style.configure("MutedOnPanel.TLabel", background=PANEL, foreground=MUTED, font=("Segoe UI", 9))
         style.configure("Heading.TLabel", background=BG, foreground=FG, font=("Segoe UI", 13, "bold"))
         style.configure("TCheckbutton", background=BG, foreground=FG, font=("Segoe UI", 10))
         style.map("TCheckbutton", background=[("active", BG)], foreground=[("disabled", MUTED)])
@@ -1843,7 +1844,7 @@ class LoopCrossfadeGUI:
         manual_card = tk.Frame(self.manual_col_holder, bg=m_bg)
         manual_card.pack(fill="both", expand=True)
         manual_proxy = tk.BooleanVar(value=not auto_on)
-        manual_cb = RoundedCheckbutton(manual_card, "Manual crossfade(s)", manual_proxy,
+        manual_cb = RoundedCheckbutton(manual_card, "Manual crossfade", manual_proxy,
                                         m_bg, m_fg, m_bg, m_check, BORDER, command=self._on_manual_clicked)
         manual_cb.pack(anchor="w", padx=10, pady=(10, 4))
         ToolTip(manual_cb.frame, "Crossfade duration in seconds (used when auto-detect is off)")
@@ -2021,10 +2022,6 @@ class LoopCrossfadeGUI:
                   font=("Segoe UI", 22, "bold")).pack(side="left")
         ttk.Label(info_row, textvariable=self.selection_duration_var, style="Muted.TLabel").pack(side="right")
 
-        ttk.Label(outer, text="Drag to select, drag edges to adjust, click to move the playhead. "
-                               "Scroll to zoom, Shift+Scroll to pan left/right.",
-                  style="Muted.TLabel").pack(anchor="w", pady=(0, 4))
-
         # transport
         transport = ttk.Frame(outer); transport.pack(fill="x", pady=(4, 4))
 
@@ -2042,9 +2039,7 @@ class LoopCrossfadeGUI:
         self.btn_repeat.pack(side="left", padx=4)
 
         self.btn_loop = self._make_icon_button(transport, "loop",
-                                                 "Audition Loop (play the processed/crossfaded selection, "
-                                                 "looped). Previews the current selection's crossfade "
-                                                 "without saving or cropping.",
+                                                 "Audition (Play processed/crossfaded section, looped.)",
                                                  self.on_loop_preview, size=self.ICON_SIZE)
         self.btn_loop.pack(side="left", padx=(16, 4))
 
@@ -2093,7 +2088,7 @@ class LoopCrossfadeGUI:
                                 "Works alongside either Auto-detect or Manual crossfade.")
         field_row = ttk.Frame(snap_col, style="Panel.TFrame")
         field_row.pack(anchor="w", pady=(4, 4))
-        ttk.Label(field_row, text="Search window(s):", style="Muted.TLabel").pack(side="left", padx=(24, 6))
+        ttk.Label(field_row, text="Search window:", style="MutedOnPanel.TLabel").pack(side="left", padx=(24, 6))
         self.window_entry = RoundedEntry(field_row, self.window_var, PANEL, FIELD_BG, FG, BORDER,
                                           height=28, radius=8, width=70)
         self.window_entry.pack(side="left")
@@ -2468,6 +2463,9 @@ class LoopCrossfadeGUI:
                 y2 = mid - mins[x] * scale
                 self.canvas.create_line(x, y1, x, y2, fill=WAVEFORM_COLOR)
 
+        # subtle zero-crossing reference line (amplitude 0 = vertical center)
+        self.canvas.create_line(0, h / 2, w, h / 2, fill=BORDER, width=1, dash=(2, 3))
+
         sx = self._sample_to_x(self.sel_start, w)
         ex = self._sample_to_x(self.sel_end, w)
         self.canvas.create_rectangle(sx, 0, ex, h, fill=SELECTION_COLOR, outline="", stipple="gray50")
@@ -2534,6 +2532,24 @@ class LoopCrossfadeGUI:
             self.drag_mode = "pending"  # resolved to "new" selection or a playhead click on release
             self.drag_anchor_x = event.x
 
+    def _snap_selection_edge(self, sample):
+        """Selection edges always snap to the nearest zero crossing -- for
+        this app specifically (crossfaded loop points), there's no real
+        case where a non-zero-crossing edge is preferable, so this isn't
+        an optional toggle. The search radius scales with the current
+        zoom level (roughly 2 pixels' worth of samples), so it never
+        visibly moves the edge further than what's already imperceptible
+        at the current zoom -- tight at extreme zoom, wider when zoomed
+        out, capped at a quarter-second so it can't search unreasonably
+        far when fully zoomed out."""
+        if self.data is None:
+            return sample
+        vs, ve = self._visible_range()
+        w = max(1, self.canvas.winfo_width() or self.canvas_width)
+        per_pixel = max(1, (ve - vs) / w)
+        window = max(1, min(int(per_pixel * 2), int(self.sr * 0.25)))
+        return self._nearest_zero_crossing(self.data, self.sr, sample, max_window_samples=window)
+
     def _on_canvas_drag(self, event):
         if self.data is None or self.drag_mode is None:
             return
@@ -2547,12 +2563,16 @@ class LoopCrossfadeGUI:
             self.sel_end = self.sel_start
 
         if self.drag_mode == "start":
-            self.sel_start = min(samp, self.sel_end)
+            self.sel_start = self._snap_selection_edge(min(samp, self.sel_end))
         elif self.drag_mode == "end":
-            self.sel_end = max(samp, self.sel_start)
+            self.sel_end = self._snap_selection_edge(max(samp, self.sel_start))
         elif self.drag_mode == "new":
             anchor_samp = self._x_to_sample(self.drag_anchor_x, w)
-            self.sel_start, self.sel_end = min(anchor_samp, samp), max(anchor_samp, samp)
+            lo, hi = min(anchor_samp, samp), max(anchor_samp, samp)
+            self.sel_start = self._snap_selection_edge(lo)
+            self.sel_end = self._snap_selection_edge(hi)
+            if self.sel_start > self.sel_end:  # extremely unlikely, but stay safe
+                self.sel_start, self.sel_end = self.sel_end, self.sel_start
 
         if self.drag_mode in ("start", "end", "new"):
             self._update_selection_duration_label()
@@ -2571,7 +2591,7 @@ class LoopCrossfadeGUI:
         total = self.player.data.shape[0]
         return int(frac * total)
 
-    def _nearest_zero_crossing(self, data, sr, sample, window_ms=15):
+    def _nearest_zero_crossing(self, data, sr, sample, window_ms=15, max_window_samples=None):
         """Finds the sample index within a small window around `sample`
         where the waveform amplitude is closest to zero. Repositioning
         playback to click PRECISELY where the user clicked, mid-waveform-
@@ -2588,10 +2608,18 @@ class LoopCrossfadeGUI:
         out-of-phase stereo content (e.g. some reverb/widening effects),
         the mix can read as exactly zero at every point in the whole
         signal even while each individual channel sits at full amplitude,
-        which would mean the search never moves the click at all."""
+        which would mean the search never moves the click at all.
+
+        max_window_samples caps the search radius -- important at extreme
+        zoom, where the default ms-based window can be LARGER than the
+        entire visible viewport, snapping the cursor to a position outside
+        what's currently shown. The playhead then appears to not move at
+        all, when it actually jumped somewhere off-screen."""
         if data is None or len(data) == 0:
             return sample
         window = max(1, int(sr * window_ms / 1000))
+        if max_window_samples is not None:
+            window = max(1, min(window, int(max_window_samples)))
         n = len(data)
         lo = max(0, sample - window)
         hi = min(n, sample + window)
@@ -2611,19 +2639,26 @@ class LoopCrossfadeGUI:
             w = self.canvas.winfo_width()
             samp = self._x_to_sample(event.x, w)
             samp = max(0, min(samp, len(self.data)))
+            # cap the zero-crossing search to a quarter of what's currently
+            # visible, so at extreme zoom the snap can't jump the cursor
+            # somewhere off-screen (which looked like clicking just did
+            # nothing, when it had actually moved -- just nowhere visible)
+            vs, ve = self._visible_range()
+            zc_cap = max(1, (ve - vs) // 4)
             if self.preview_mode and self.sel_start <= samp < self.sel_end:
                 # clicking WITHIN the loop region while auditioning: stay in
                 # preview mode (don't fall back to raw/unprocessed audio) --
                 # this is what lets you scrub right up to the loop-back
                 # point and hear the actual crossfaded wrap
                 preview_cursor = self._raw_to_preview_cursor(samp)
-                preview_cursor = self._nearest_zero_crossing(self.player.data, self.player.sr, preview_cursor)
+                preview_cursor = self._nearest_zero_crossing(self.player.data, self.player.sr,
+                                                               preview_cursor, max_window_samples=zc_cap)
                 self.player.set_cursor(preview_cursor)
             else:
                 # clicking outside the loop region: always operate on raw
                 # audio, so you can freely check surrounding context
                 self._exit_preview_mode()
-                snapped = self._nearest_zero_crossing(self.data, self.sr, samp)
+                snapped = self._nearest_zero_crossing(self.data, self.sr, samp, max_window_samples=zc_cap)
                 self.player.set_cursor(snapped)
             self._show_click_flag(event.x, samp)
             self._redraw()
@@ -3202,15 +3237,39 @@ class LoopCrossfadeGUI:
         tk, ttk = self.tk, self.ttk
         dlg = tk.Toplevel(self.root)
         self._shortcuts_dialog = dlg
-        dlg.title("Keyboard Shortcuts")
+        dlg.title("Hints & Keyboard Shortcuts")
         dlg.configure(bg=BG)
         dlg.transient(self.root)
 
+        content = tk.Frame(dlg, bg=BG)
+        content.pack(fill="both", expand=True)
+
+        ttk.Label(content, text="HINTS", background=BG, foreground=FG,
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=12, pady=(10, 4))
+        for hint in ("Drag to select",
+                     "Drag edges to adjust",
+                     "Click in waveform to move playhead",
+                     "Enable Repeat or Audition to preview loop",
+                     "Optional: Stretch selection with PaulXStretch",
+                     "Set Power, Snap, Crossfade options",
+                     "Crop and save"):
+            ttk.Label(content, text=f"\u2022 {hint}", background=BG, foreground=MUTED,
+                      font=("Segoe UI", 9)).pack(anchor="w", padx=22, pady=1)
+
+        tk.Frame(content, height=1, bg=BORDER).pack(fill="x", padx=12, pady=(10, 8))
+
+        ttk.Label(content, text="KEYBOARD SHORTCUTS", background=BG, foreground=FG,
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=12, pady=(0, 4))
+
+        shortcuts_frame = tk.Frame(content, bg=BG)
+        shortcuts_frame.pack(fill="x", padx=12, pady=(0, 10))
+
         rows = {}
         for i, (name, label) in enumerate(SHORTCUT_LABELS.items()):
-            ttk.Label(dlg, text=label, background=BG, foreground=FG).grid(row=i, column=0, sticky="w", padx=10, pady=6)
-            btn = ttk.Button(dlg, text=self.shortcuts.get(name, DEFAULT_SHORTCUTS[name]), width=14)
-            btn.grid(row=i, column=1, padx=10, pady=6)
+            ttk.Label(shortcuts_frame, text=label, background=BG, foreground=FG).grid(
+                row=i, column=0, sticky="w", pady=3)
+            btn = ttk.Button(shortcuts_frame, text=self.shortcuts.get(name, DEFAULT_SHORTCUTS[name]), width=14)
+            btn.grid(row=i, column=1, padx=(10, 0), pady=3)
             rows[name] = btn
 
         def start_listening(name, btn):
@@ -3230,9 +3289,7 @@ class LoopCrossfadeGUI:
         for name, btn in rows.items():
             btn.configure(command=lambda n=name, b=btn: start_listening(n, b))
 
-        # a bit of bottom margin now that the Done button (redundant with
-        # the window's native close button) is gone
-        tk.Frame(dlg, height=10, bg=BG).grid(row=len(rows), column=0, columnspan=2)
+        # (shortcuts_frame's own bottom padding already provides margin)
 
         dlg.update_idletasks()
         required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
