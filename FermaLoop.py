@@ -1726,7 +1726,14 @@ class RoundedDropdown:
             row.bind("<Enter>", lambda e, r=row: r.configure(bg=self.accent))
             row.bind("<Leave>", lambda e, r=row: r.configure(bg=self.field_bg))
             row.bind("<Button-1>", lambda e, v=val: self._select(v))
-        self.popup.bind("<FocusOut>", lambda e: self._close_popup())
+        # Deliberately NOT closing on <FocusOut>: overrideredirect popups
+        # are known to get unreliable/premature FocusOut events from
+        # macOS's window server specifically (reported: the popup would
+        # frequently vanish just from moving the mouse toward it, before
+        # a row could even be clicked -- consistent with a spurious focus
+        # event, not an actual click elsewhere). Closing now only happens
+        # via selecting a row or clicking the dropdown button again to
+        # toggle it shut, both of which are reliable on every platform.
         self.popup.focus_set()
 
     def _select(self, val):
@@ -4113,6 +4120,20 @@ class LoopCrossfadeGUI:
         # ever needs to fit itself, not compete with two others for
         # space side by side, so this is naturally much narrower than
         # the side-by-side layout.
+        #
+        # Each canvas's <Configure> binding triggers a full supersampled
+        # PIL render on every resize -- correct for actual on-screen
+        # resizing, but this measurement pass alone involves several
+        # pack/repack cycles that don't need to be seen, only measured.
+        # Left bound, this was rendering each box 4-5+ times before
+        # settling (reported as a multi-second blank delay for these
+        # three boxes at launch). Temporarily unbinding for the
+        # measurement-only portion and restoring it right before the one
+        # real, visible layout pass cuts that down to a single render
+        # per box.
+        for box_outer, _ in self._box_pairs:
+            box_outer._rc["canvas"].unbind("<Configure>")
+
         self._box_layout_mode = None
         for box_outer, _ in self._box_pairs:
             box_outer.pack_forget()
@@ -4126,9 +4147,8 @@ class LoopCrossfadeGUI:
             # the box's real natural content width for this measurement.
             box_outer._rc["canvas"].configure(width=box_outer._rc["natural_w"])
         self._box_layout_mode = "stacked"
-        self.root.update()  # full update -- the responsive canvases' own
-                             # <Configure> bindings need a real event pass
-                             # to settle before reqwidth reflects this layout
+        self.root.update()  # full update -- reqwidth needs a real event
+                             # pass to settle and reflect this pack change
         stacked_w = self.root.winfo_reqwidth()
         stacked_h = self.root.winfo_reqheight()
 
@@ -4142,6 +4162,11 @@ class LoopCrossfadeGUI:
                 self.root.geometry(f"{w}x{h}")
         else:
             self.root.geometry(f"{w}x{h}")
+
+        # restore each canvas's real <Configure> binding NOW, right
+        # before the one layout pass that actually needs to be seen
+        for box_outer, _ in self._box_pairs:
+            box_outer._rc["canvas"].bind("<Configure>", box_outer._rc["redraw"])
 
         self._box_layout_mode = None  # forces _update_box_layout to re-evaluate for the actual applied size
         self._update_box_layout()
