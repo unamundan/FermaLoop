@@ -3721,6 +3721,19 @@ class LoopCrossfadeGUI:
         for box_outer, _ in self._box_pairs:
             box_outer.pack(fill="x", pady=(0, 6))
             self._set_box_height(box_outer, box_outer._rc["natural_h"])
+            # THE ACTUAL FIX: a bare tk.Canvas without an explicit -width
+            # doesn't compute winfo_reqwidth() from its content at all --
+            # it just reports whatever its last ACTUAL rendered size
+            # happened to be, which was ~1/3 of the wide side-by-side row
+            # for all three boxes (confirmed by logged data: all three
+            # canvases reported the exact same reqwidth as the unrelated
+            # waveform canvas). Just changing pack options doesn't make a
+            # canvas recompute that on its own. Explicitly setting the
+            # width here forces it to reflect the box's real natural
+            # content width for this measurement; cleared again below
+            # once the true minimum has been captured, so normal
+            # responsive resizing during actual use is unaffected.
+            box_outer._rc["canvas"].configure(width=box_outer._rc["natural_w"])
         self._box_layout_mode = "stacked"
         self.root.update()  # full update, not just idle tasks -- the
                              # responsive canvases' own <Configure> bindings
