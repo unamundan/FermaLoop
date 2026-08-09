@@ -689,6 +689,20 @@ SHORTCUT_LABELS = {
     "stretch": "PaulXStretch...",
 }
 
+# single source of truth for transport-button hover hints (display name +
+# description) -- referenced by both initial button creation and the
+# refresh-after-remap logic, so a text change only ever needs to happen
+# in one place instead of two staying manually in sync
+TRANSPORT_HINTS = {
+    "play_pause": ("Play / Pause", "Activate / freeze playback"),
+    "stop": ("Stop", "Stop playback"),
+    "loop_toggle": ("Repeat", "Loop raw selection without crossfade "
+                              "(a click will likely be heard at the seam)"),
+    "audition": ("Loop", "Preview processed crossfade, looped"),
+    "crop": ("Crop Selected", "Remove unselected audio"),
+    "stretch": ("Stretch", "Open PaulXStretch for extreme time-stretching of the current selection"),
+}
+
 _MAC_MOD_SYMBOLS = {"Control": "\u2303", "Command": "\u2318", "Cmd": "\u2318",
                      "Shift": "\u21e7", "Alt": "\u2325", "Option": "\u2325"}
 _OTHER_MOD_NAMES = {"Control": "Ctrl", "Command": "Cmd", "Shift": "Shift", "Alt": "Alt"}
@@ -2146,11 +2160,13 @@ class LoopCrossfadeGUI:
         entry_widget.bind("<Return>", lambda e: self.root.focus_set())
         entry_widget.bind("<KP_Enter>", lambda e: self.root.focus_set())
 
-    def _transport_tooltip(self, action_name, display_name, description):
-        """Looks up the CURRENT shortcut (respecting remaps) for
-        action_name and returns (display_name, key_display, description)
-        -- the three pieces ToolTip.set_rich() renders as a bold name, a
-        simulated keycap badge, and the description underneath."""
+    def _transport_tooltip(self, action_name):
+        """Looks up the display name/description from TRANSPORT_HINTS and
+        the CURRENT shortcut (respecting remaps) for action_name, and
+        returns (display_name, key_display, description) -- the three
+        pieces ToolTip.set_rich() renders as a bold name, a simulated
+        keycap badge, and the description underneath."""
+        display_name, description = TRANSPORT_HINTS[action_name]
         key = self.shortcuts.get(action_name, DEFAULT_SHORTCUTS.get(action_name, ""))
         key_display = format_key_for_display(key) if key else ""
         return (display_name, key_display, description)
@@ -2250,7 +2266,7 @@ class LoopCrossfadeGUI:
 
         header_row = ttk.Frame(outer); header_row.pack(fill="x", pady=(0, 10))
         ttk.Label(header_row, text="FermaLoop", style="Heading.TLabel").pack(side="left")
-        btn_gear = self._make_icon_button(header_row, "info", "Keyboard Shortcuts...",
+        btn_gear = self._make_icon_button(header_row, "info", "Hints & Keyboard Shortcuts",
                                            self.open_shortcuts_dialog, size=20)
         btn_gear.pack(side="right")
 
@@ -2327,41 +2343,32 @@ class LoopCrossfadeGUI:
         transport_icons.pack(expand=True)  # centers the icon group horizontally
 
         self.btn_play = self._make_icon_button(transport_icons, "play",
-            self._transport_tooltip("play_pause", "Play / Pause", "Activate / freeze playback"),
-            self.on_play_pause, size=self.ICON_SIZE)
+            self._transport_tooltip("play_pause"), self.on_play_pause, size=self.ICON_SIZE)
         self.btn_play.pack(side="left", padx=(0, 4))
         self._play_tooltip = self._last_tooltip
 
         self.btn_stop = self._make_icon_button(transport_icons, "stop",
-            self._transport_tooltip("stop", "Stop", "Stop playback"),
-            self.on_stop, size=self.ICON_SIZE)
+            self._transport_tooltip("stop"), self.on_stop, size=self.ICON_SIZE)
         self.btn_stop.pack(side="left", padx=4)
         self._stop_tooltip = self._last_tooltip
 
         self.btn_repeat = self._make_icon_button(transport_icons, "repeat",
-            self._transport_tooltip("loop_toggle", "Repeat", "Loop raw selection (no crossfade -- "
-                                     "you'll hear a click at the seam)"),
-            self.on_repeat_toggle, size=self.ICON_SIZE)
+            self._transport_tooltip("loop_toggle"), self.on_repeat_toggle, size=self.ICON_SIZE)
         self.btn_repeat.pack(side="left", padx=4)
         self._repeat_tooltip = self._last_tooltip
 
         self.btn_loop = self._make_icon_button(transport_icons, "loop",
-            self._transport_tooltip("audition", "Loop", "Preview processed crossfade, looped"),
-            self.on_loop_preview, size=self.ICON_SIZE)
+            self._transport_tooltip("audition"), self.on_loop_preview, size=self.ICON_SIZE)
         self.btn_loop.pack(side="left", padx=(16, 4))
         self._loop_tooltip = self._last_tooltip
 
         self.btn_crop = self._make_icon_button(transport_icons, "crop",
-            self._transport_tooltip("crop", "Crop Selected", "Remove unselected audio, "
-                                     "committing the working range"),
-            self.on_crop, size=self.ICON_SIZE)
+            self._transport_tooltip("crop"), self.on_crop, size=self.ICON_SIZE)
         self.btn_crop.pack(side="left", padx=4)
         self._crop_tooltip = self._last_tooltip
 
         btn_stretch = self._make_icon_button(transport_icons, "stretch",
-            self._transport_tooltip("stretch", "Stretch", "Open PaulXStretch for extreme "
-                                     "time-stretching of the current selection"),
-            self.open_stretch_dialog, size=self.ICON_SIZE)
+            self._transport_tooltip("stretch"), self.open_stretch_dialog, size=self.ICON_SIZE)
         btn_stretch.pack(side="left", padx=4)
         self._stretch_tooltip = self._last_tooltip
 
@@ -2384,7 +2391,7 @@ class LoopCrossfadeGUI:
 
         # CURVE
         curve_outer, curve_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
-        _section_header(curve_inner, "CURVE")
+        _section_header(curve_inner, "FADE CURVE")
         self._curve_radios = []
 
         def _on_curve_click(value):
@@ -3695,21 +3702,18 @@ class LoopCrossfadeGUI:
         """Updates every transport button's hover hint to reflect the
         current shortcut bindings -- called after a remap so a tooltip
         never shows a stale key."""
-        tooltip_specs = [
-            ("_play_tooltip", "play_pause", "Play / Pause", "Activate / freeze playback"),
-            ("_stop_tooltip", "stop", "Stop", "Stop playback"),
-            ("_repeat_tooltip", "loop_toggle", "Repeat",
-             "Loop raw selection (no crossfade -- you'll hear a click at the seam)"),
-            ("_loop_tooltip", "audition", "Loop", "Preview processed crossfade, looped"),
-            ("_crop_tooltip", "crop", "Crop Selected",
-             "Remove unselected audio, committing the working range"),
-            ("_stretch_tooltip", "stretch", "Stretch",
-             "Open PaulXStretch for extreme time-stretching of the current selection"),
-        ]
-        for attr, action_name, display_name, description in tooltip_specs:
+        tooltip_attrs = {
+            "_play_tooltip": "play_pause",
+            "_stop_tooltip": "stop",
+            "_repeat_tooltip": "loop_toggle",
+            "_loop_tooltip": "audition",
+            "_crop_tooltip": "crop",
+            "_stretch_tooltip": "stretch",
+        }
+        for attr, action_name in tooltip_attrs.items():
             tooltip = getattr(self, attr, None)
             if tooltip is not None:
-                tooltip.set_rich(*self._transport_tooltip(action_name, display_name, description))
+                tooltip.set_rich(*self._transport_tooltip(action_name))
 
     @staticmethod
     def _event_to_key_string(event):
