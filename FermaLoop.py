@@ -1876,18 +1876,28 @@ class LoopCrossfadeGUI:
         how Input/Save-as and Process & Save already behave) instead of
         staying a fixed size -- redraws the rounded background on every
         resize. `forced_height` lets a row of these share one common
-        height instead of each sizing independently to its own content."""
+        height instead of each sizing independently to its own content.
+
+        Height is stored in rc (mutable) rather than captured by value in
+        the redraw() closure, so _set_box_height() can change it later
+        (e.g. switching between a shared row height and the box's own
+        natural height as the layout switches between side-by-side and
+        stacked) without re-binding <Configure> or recreating the content
+        window each time -- doing that on every layout-mode switch would
+        stack up duplicate bindings."""
         rc = outer._rc
         canvas, inner, padding = rc["canvas"], rc["inner"], rc["padding"]
         inner.update_idletasks()
         natural_w = inner.winfo_reqwidth() + padding * 2
         natural_h = inner.winfo_reqheight() + padding * 2
-        h = forced_height if forced_height is not None else natural_h
-        canvas.configure(height=h)
+        rc["natural_w"], rc["natural_h"] = natural_w, natural_h
+        rc["current_height"] = forced_height if forced_height is not None else natural_h
+        canvas.configure(height=rc["current_height"])
         canvas.create_window(padding, padding, anchor="nw", window=inner, tags="content")
 
         def redraw(event=None):
-            w = max(natural_w, canvas.winfo_width())
+            w = max(rc["natural_w"], canvas.winfo_width())
+            h = rc["current_height"]
             if PIL_AVAILABLE:
                 img = render_rounded_box_image(w, h, rc["radius"], rc["fill"], rc["border"])
                 photo = ImageTk.PhotoImage(img)
@@ -1896,9 +1906,46 @@ class LoopCrossfadeGUI:
                 canvas.create_image(0, 0, anchor="nw", image=photo, tags="bg")
                 canvas.tag_lower("bg")  # keep it behind the actual content
 
+        rc["redraw"] = redraw
         canvas.bind("<Configure>", redraw)
         redraw()
         return natural_w, natural_h
+
+    def _set_box_height(self, outer, new_height):
+        """Changes a previously-finalized responsive box's height without
+        re-binding <Configure> or recreating its content window."""
+        rc = outer._rc
+        rc["current_height"] = new_height
+        rc["canvas"].configure(height=new_height)
+        rc["redraw"]()
+
+    def _update_box_layout(self):
+        """Switches the CURVE/XFADE/LOOP row between side-by-side (when
+        there's room for all three at their natural width) and stacked
+        (each full-width, one above the other) when there isn't -- this
+        is what lets the window's true minimum width be as small as a
+        SINGLE box's natural width, rather than needing to fit all three
+        side by side at once. Only re-packs when the mode actually
+        changes, not on every resize event."""
+        available = self._cols_row.winfo_width()
+        if available < 10:
+            available = self.root.winfo_width() or self._side_by_side_min_width
+        mode = "side_by_side" if available >= self._side_by_side_min_width else "stacked"
+        if mode == self._box_layout_mode:
+            return
+        self._box_layout_mode = mode
+
+        for box_outer, _ in self._box_pairs:
+            box_outer.pack_forget()
+
+        if mode == "side_by_side":
+            for (box_outer, _), pad in zip(self._box_pairs, self._box_side_by_side_paddings):
+                box_outer.pack(side="left", fill="both", expand=True, padx=pad)
+                self._set_box_height(box_outer, self._boxes_shared_height)
+        else:
+            for box_outer, _ in self._box_pairs:
+                box_outer.pack(fill="x", pady=(0, 6))
+                self._set_box_height(box_outer, box_outer._rc["natural_h"])
 
     def _on_auto_detect_clicked(self):
         self.auto_xfade_var.set(True)
@@ -2221,22 +2268,32 @@ class LoopCrossfadeGUI:
         ToolTip(self.window_entry.frame, "How far from each end to search for a transient (seconds) -- "
                                           "auto-populated, override by typing a new value")
 
-        # All three now finalize with ONE SHARED height (the tallest of
-        # the three's own natural content), and each is packed to equally
-        # share -- and stretch with -- the row's width as the window is
-        # resized, matching how Input/Save-as and Process & Save already
-        # behave, rather than staying a fixed size.
-        box_pairs = [(curve_outer, curve_inner), (xfade_outer, xfade_inner), (loop_outer, loop_inner)]
-        natural_heights = []
-        for box_outer, box_inner in box_pairs:
-            box_inner.update_idletasks()
-            natural_heights.append(box_inner.winfo_reqheight() + box_outer._rc["padding"] * 2)
-        shared_height = max(natural_heights)
+        # All three "finalize" once here (creates each box's content
+        # window + background, binds its own resize handling) -- actual
+        # packing/height is then handled by _update_box_layout below,
+        # which switches between side-by-side and stacked depending on
+        # how much width is actually available.
+        self._box_pairs = [(curve_outer, curve_inner), (xfade_outer, xfade_inner), (loop_outer, loop_inner)]
+        self._box_side_by_side_paddings = [(0, 8), (8, 8), (8, 0)]
+        self._cols_row = cols_row
+        self._box_layout_mode = None  # forces the first _update_box_layout call to actually apply
 
-        paddings = [(0, 8), (8, 8), (8, 0)]
-        for (box_outer, box_inner), pad in zip(box_pairs, paddings):
-            box_outer.pack(side="left", fill="both", expand=True, padx=pad)
-            self._finalize_responsive_section(box_outer, forced_height=shared_height)
+        natural_widths = []
+        natural_heights = []
+        for box_outer, box_inner in self._box_pairs:
+            nw, nh = self._finalize_responsive_section(box_outer)
+            natural_widths.append(nw)
+            natural_heights.append(nh)
+        self._boxes_shared_height = max(natural_heights)
+        # true minimum width needed side-by-side (all three plus gaps) vs.
+        # stacked (just the single widest box) -- used by _update_box_layout
+        # to decide which mode fits, and by _apply_saved_or_natural_size to
+        # set a genuinely small window minsize now that stacking exists
+        self._side_by_side_min_width = sum(natural_widths) + 16  # +padx gaps between boxes
+        self._stacked_min_width = max(natural_widths)
+
+        self._update_box_layout()
+        cols_row.bind("<Configure>", lambda e: self._update_box_layout())
 
         btn_process = ttk.Button(outer, text="Process & Save", style="Accent.TButton",
                    command=self.run_process, takefocus=0)
@@ -3635,18 +3692,29 @@ class LoopCrossfadeGUI:
                 self.root.geometry(f"{w}x{h}")
         else:
             self.root.geometry(f"{w}x{h}")
-        # required_w correctly reflects the TRUE minimum comfortable
-        # width -- including the CURVE/XFADE/LOOP row's own natural
-        # content width, which their backgrounds are deliberately never
-        # drawn narrower than (see _finalize_responsive_section). An
-        # earlier version of this capped the minimum at an arbitrary
-        # 480px to let the window shrink further -- but that let the
-        # window be dragged narrower than the layout can actually
-        # support without clipping, which is exactly what that caused.
-        # The boxes stretching wider on a larger window is the real
-        # responsive win here; letting the window shrink below what the
-        # content can honestly fit was never a good trade.
-        self.root.minsize(required_w, required_h)
+        # Measure the TRUE minimum width now that the CURVE/XFADE/LOOP row
+        # can stack vertically: temporarily force stacked mode, measure,
+        # then restore whatever mode actually fits the window being
+        # applied above. This is what makes the minimum genuinely small
+        # now, rather than needing to fit all three boxes side by side --
+        # a stacked box only competes with itself for width, not two
+        # others. (An earlier version just capped the minimum at an
+        # arbitrary 480px without checking the layout could support it,
+        # which let the window shrink into visibly clipped content --
+        # this instead measures a width the layout actually can honor.)
+        self._box_layout_mode = None
+        for box_outer, _ in self._box_pairs:
+            box_outer.pack_forget()
+        for box_outer, _ in self._box_pairs:
+            box_outer.pack(fill="x", pady=(0, 6))
+            self._set_box_height(box_outer, box_outer._rc["natural_h"])
+        self._box_layout_mode = "stacked"
+        self.root.update_idletasks()
+        min_w = self.root.winfo_reqwidth()
+
+        self._box_layout_mode = None  # forces _update_box_layout to re-evaluate for real
+        self._update_box_layout()
+        self.root.minsize(min_w, required_h)
 
     def _on_close(self):
         try:
