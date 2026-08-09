@@ -3346,6 +3346,16 @@ class LoopCrossfadeGUI:
         self._redraw()
 
     def zoom_to_fit(self):
+        # TEMPORARY diagnostic: confirms whether this is even being
+        # reached at all when "0" is pressed, vs. a binding-delivery
+        # issue upstream of this function ever running. Safe to remove
+        # once we know which side of that line the problem is on.
+        try:
+            import datetime
+            self.status_var.set(f"zoom_to_fit() called at {datetime.datetime.now().strftime('%H:%M:%S')} "
+                                 f"-- data loaded: {self.data is not None}")
+        except Exception:
+            pass
         if self.data is None:
             return
         self.zoom_start, self.zoom_end = 0, len(self.data)
