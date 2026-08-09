@@ -748,6 +748,24 @@ def load_shortcuts(path=SHORTCUTS_PATH):
                 saved = json.load(f)
             merged = dict(DEFAULT_SHORTCUTS)
             merged.update({k: v for k, v in saved.items() if k in DEFAULT_SHORTCUTS})
+            # One-time migration: a shortcuts file saved before this
+            # platform had its own Command-key defaults (or saved while
+            # testing on a different platform) can leave "undo"/"redo"
+            # stuck on the old Control-based binding even on a Mac,
+            # since a SAVED value always takes precedence over
+            # DEFAULT_SHORTCUTS -- this app auto-saves shortcuts on
+            # close regardless of whether anything was ever deliberately
+            # remapped. Only corrects a value that EXACTLY matches the
+            # old, known non-Mac default (not anything else the user
+            # might have deliberately remapped it to), and only runs
+            # once per file -- a deliberate remap back to Control-z
+            # afterward is respected and won't keep getting overridden.
+            if IS_MACOS and not saved.get("_mac_defaults_migrated"):
+                if merged.get("undo") == "Control-z":
+                    merged["undo"] = DEFAULT_SHORTCUTS["undo"]
+                if merged.get("redo") == "Shift-Control-z":
+                    merged["redo"] = DEFAULT_SHORTCUTS["redo"]
+                merged["_mac_defaults_migrated"] = True
             return merged
         except Exception:
             return dict(DEFAULT_SHORTCUTS)
