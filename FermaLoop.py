@@ -1412,8 +1412,11 @@ def render_icon_image(name, size, color_hex, supersample=6, rotation_deg=0):
         # -- correct since the canvas is RGBA, so erasing back to
         # (0,0,0,0) leaves a true hole regardless of what's behind the
         # icon when it's later composited, rather than needing to match
-        # a specific background color.
-        import math
+        # a specific background color. (math is imported at module
+        # level -- a local "import math" here would shadow it for the
+        # WHOLE function due to Python's scoping rules, breaking the
+        # nested arrowhead() helper other icons rely on, even on calls
+        # that never touch this branch at all.)
         n_teeth = 8
         outer_r = sw * 0.30    # base circle radius, between teeth
         tip_r = sw * 0.40      # tooth tip radius
