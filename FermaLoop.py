@@ -1747,20 +1747,38 @@ class ToolTip:
     text-only icon buttons (where there's no visible label to explain
     what they do) as well as ordinary fields/buttons."""
 
+    enabled = True  # class-level: toggling this affects every ToolTip
+                     # instance at once, app-wide (see the "Show hover
+                     # tooltips" checkbox in Hints & Keyboard Shortcuts)
+    _all_instances = []  # so set_enabled(False) can immediately hide any
+                          # tooltip that's already showing, not just
+                          # prevent future ones from appearing
+
     def __init__(self, widget, text=None, delay=500):
         import tkinter as tk
         self.tk = tk
         self.widget = widget
         self.text = text
         self.rich = None
+        self.section = None
         self.delay = delay
         self.tip = None
         self.after_id = None
         widget.bind("<Enter>", self._schedule, add="+")
         widget.bind("<Leave>", self._hide, add="+")
         widget.bind("<ButtonPress>", self._hide, add="+")
+        ToolTip._all_instances.append(self)
+
+    @classmethod
+    def set_enabled(cls, value):
+        cls.enabled = value
+        if not value:
+            for inst in cls._all_instances:
+                inst._hide()
 
     def _schedule(self, event=None):
+        if not ToolTip.enabled:
+            return
         self._cancel()
         self.after_id = self.widget.after(self.delay, self._show)
 
@@ -1778,6 +1796,20 @@ class ToolTip:
         new binding without needing to be recreated."""
         self.text = text
         self.rich = None
+        self.section = None
+
+    def set_section(self, title, description, bullets):
+        """Section-level tooltip: bold TITLE, a regular-face overview
+        description, a separator, then a bulleted list of the section's
+        individual sub-features. Used so hovering ANYWHERE within a
+        multi-control section (e.g. XFADE OVERLAP's Manual/Auto radios)
+        shows one comprehensive tooltip covering the whole area, instead
+        of a different fragment depending on which exact control you're
+        over -- attach the SAME ToolTip content to every widget in the
+        section for that to actually work on hover."""
+        self.section = (title, description, list(bullets))
+        self.text = None
+        self.rich = None
 
     def set_rich(self, name, key, description):
         """Switches this tooltip to the richer transport-button style:
@@ -1785,9 +1817,10 @@ class ToolTip:
         separator, then the description -- instead of one plain line."""
         self.rich = (name, key, description)
         self.text = None
+        self.section = None
 
     def _show(self):
-        if self.tip is not None or (not self.text and not self.rich):
+        if self.tip is not None or (not self.text and not self.rich and not self.section):
             return
         try:
             anchor_x = self.widget.winfo_rootx() + 12
@@ -1820,6 +1853,26 @@ class ToolTip:
             tk.Label(frame, text=description, bg=TOOLTIP_BG, fg=MUTED,
                      font=("Segoe UI", 9), wraplength=TOOLTIP_WRAPLENGTH, justify="left").pack(
                      anchor="w", fill="x", padx=9, pady=(5, 7))
+        elif self.section:
+            title, description, bullets = self.section
+            frame = tk.Frame(self.tip, bg=TOOLTIP_BG, relief="solid", borderwidth=1,
+                              highlightbackground=TOOLTIP_BORDER)
+            frame.pack()
+            tk.Label(frame, text=title.upper(), bg=TOOLTIP_BG, fg=FG,
+                     font=("Segoe UI", 9, "bold"), wraplength=TOOLTIP_WRAPLENGTH, justify="left").pack(
+                     anchor="w", fill="x", padx=9, pady=(7, 2))
+            if description:
+                tk.Label(frame, text=description, bg=TOOLTIP_BG, fg=MUTED,
+                         font=("Segoe UI", 9), wraplength=TOOLTIP_WRAPLENGTH, justify="left").pack(
+                         anchor="w", fill="x", padx=9, pady=(0, 6))
+            if bullets:
+                tk.Frame(frame, height=1, bg=TOOLTIP_BORDER).pack(fill="x", padx=9)
+                bullets_frame = tk.Frame(frame, bg=TOOLTIP_BG)
+                bullets_frame.pack(fill="x", padx=9, pady=(6, 7))
+                for bullet in bullets:
+                    tk.Label(bullets_frame, text=f"\u2022 {bullet}", bg=TOOLTIP_BG, fg=MUTED,
+                             font=("Segoe UI", 9), wraplength=TOOLTIP_WRAPLENGTH - 10,
+                             justify="left").pack(anchor="w", fill="x", pady=1)
         else:
             label = tk.Label(self.tip, text=self.text, bg=TOOLTIP_BG, fg=FG,
                               font=("Segoe UI", 9), padx=8, pady=4,
@@ -1894,6 +1947,12 @@ class LoopCrossfadeGUI:
         self.root.title("FermaLoop")
         self.root.configure(bg=BG)
         self.window_sizes = load_window_sizes()
+        # tooltip on/off preference lives in the same JSON as window
+        # sizes/positions rather than a dedicated file, since it's a
+        # single small boolean and this file is already loaded/saved at
+        # startup/shutdown anyway
+        ToolTip.enabled = bool(self.window_sizes.get("tooltips_enabled", True))
+        self.tooltips_enabled_var = tk.BooleanVar(value=ToolTip.enabled)
 
         self._build_style()
 
@@ -2145,19 +2204,23 @@ class LoopCrossfadeGUI:
         manual_radio = RoundedRadio(content, "Manual", lambda: not self.auto_xfade_var.get(),
                                      self._on_manual_clicked, PANEL, FG, ACCENT, MUTED)
         manual_radio.frame.grid(row=0, column=0, sticky="w", pady=(0, 2))
-        ToolTip(manual_radio.frame, "Crossfade duration in seconds")
 
         self.xfade_entry = RoundedEntry(content, self.xfade_var, PANEL, FIELD_BG, FG, BORDER,
                                          height=26, radius=7, width=60)
         self.xfade_entry.frame.grid(row=0, column=1, sticky="w", padx=(10, 0), pady=(0, 2))
         self._defocus_on_return(self.xfade_entry.entry)
-        ToolTip(self.xfade_entry.frame, "Crossfade duration in seconds")
 
         auto_radio = RoundedRadio(content, "Auto", lambda: self.auto_xfade_var.get(),
                                    self._on_auto_detect_clicked, PANEL, FG, ACCENT, MUTED)
         auto_radio.frame.grid(row=1, column=0, sticky="w")
-        ToolTip(auto_radio.frame, "Automatically pick the crossfade length that best matches\n"
-                                   "the head and tail of the selection, instead of a fixed value")
+
+        xfade_section_desc = "Sets how much of the selection's head and tail blend together at the loop seam"
+        xfade_section_bullets = ["Manual: crossfade duration in seconds",
+                                  "Auto: automatically picks the crossfade length that best "
+                                  "matches the head and tail of the selection, instead of a fixed value"]
+        for widget in (manual_radio.frame, self.xfade_entry.frame, auto_radio.frame):
+            tip = ToolTip(widget)
+            tip.set_section("XFADE OVERLAP", xfade_section_desc, xfade_section_bullets)
 
         self.auto_value_label = tk.Label(content, textvariable=self.auto_xfade_value_var,
                                           bg=PANEL, fg=MUTED, font=("Segoe UI", 9))
@@ -2426,15 +2489,16 @@ class LoopCrossfadeGUI:
                 r.refresh()
             self._on_param_changed()
 
-        curve_tip = ("Curve: shapes how the crossfade blends the two ends together.\n"
-                     "Equal power: smoother, constant perceived loudness through the fade.\n"
-                     "Linear: simpler ramp, can dip slightly in the middle.")
+        curve_section_tip = ("Shapes how the crossfade blends the two ends together",
+                              ["Equal power: smoother, constant perceived loudness through the fade",
+                               "Linear: simpler ramp, can dip slightly in the middle"])
         for value in ("Equal power", "Linear"):
             radio = RoundedRadio(curve_inner, value, (lambda v=value: self.curve_var.get() == v),
                                   (lambda v=value: _on_curve_click(v)), PANEL, FG, ACCENT, MUTED)
             radio.pack(anchor="w", pady=1)
             self._curve_radios.append(radio)
-            ToolTip(radio.frame, curve_tip)
+            tip = ToolTip(radio.frame)
+            tip.set_section("XFADE CURVE", curve_section_tip[0], curve_section_tip[1])
 
         # XFADE
         xfade_outer, xfade_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
@@ -2450,16 +2514,21 @@ class LoopCrossfadeGUI:
                             self.snap_var, PANEL, FG, FIELD_BG, ACCENT, BORDER,
                             command=self._toggle_window_entry)
         snap_cb.pack(side="left")
-        ToolTip(snap_cb.frame, "Trim the selection to the strongest nearby attack at each end,\n"
-                                "so the loop starts/ends on the beat instead of an arbitrary sample.\n"
-                                "Works alongside either Auto or Manual crossfade.")
         self.window_entry = RoundedEntry(snap_row, self.window_var, PANEL, FIELD_BG, FG, BORDER,
                                           height=26, radius=7, width=60)
         self.window_entry.pack(side="left", padx=(14, 0))
         self.window_entry.configure(state="normal" if self.snap_var.get() else "disabled")
         self._defocus_on_return(self.window_entry.entry)
-        ToolTip(self.window_entry.frame, "How far from each end to search for a transient (seconds) -- "
-                                          "auto-populated, override by typing a new value")
+
+        loop_section_desc = "Trims the selection to align with the strongest nearby transient at each end"
+        loop_section_bullets = ["Snap to transients: trims to the strongest nearby attack at each end, "
+                                 "so the loop starts/ends on the beat instead of an arbitrary sample -- "
+                                 "works alongside either Auto or Manual crossfade",
+                                 "Search range: how far from each end to search for a transient, in "
+                                 "seconds -- auto-populated, override by typing a new value"]
+        for widget in (snap_cb.frame, self.window_entry.frame):
+            tip = ToolTip(widget)
+            tip.set_section("LOOP ALIGNMENT", loop_section_desc, loop_section_bullets)
 
         # All three "finalize" once here (creates each box's content
         # window + background, binds its own resize handling) -- actual
@@ -2523,6 +2592,9 @@ class LoopCrossfadeGUI:
 
     def _toggle_window_entry(self):
         self.window_entry.configure(state="normal" if self.snap_var.get() else "disabled")
+
+    def _on_tooltips_toggle(self):
+        ToolTip.set_enabled(self.tooltips_enabled_var.get())
 
     def _on_mp3_quality_change(self, value_str=None):
         q = int(round(float(self.mp3_quality_var.get())))
@@ -3816,6 +3888,11 @@ class LoopCrossfadeGUI:
             ttk.Label(content, text=f"\u2022 {hint}", background=BG, foreground=MUTED,
                       font=("Segoe UI", 9)).pack(anchor="w", padx=22, pady=1)
 
+        tooltip_toggle = RoundedCheckbutton(content, "Show hover tooltips", self.tooltips_enabled_var,
+                                             BG, FG, FIELD_BG, ACCENT, BORDER,
+                                             command=self._on_tooltips_toggle)
+        tooltip_toggle.pack(anchor="w", padx=12, pady=(6, 2))
+
         tk.Frame(content, height=1, bg=BORDER).pack(fill="x", padx=12, pady=(10, 8))
 
         ttk.Label(content, text="KEYBOARD SHORTCUTS", background=BG, foreground=FG,
@@ -3992,6 +4069,7 @@ class LoopCrossfadeGUI:
                 "x": self.root.winfo_x(),
                 "y": self.root.winfo_y(),
             }
+            self.window_sizes["tooltips_enabled"] = ToolTip.enabled
             save_window_sizes(self.window_sizes)
         except Exception:
             pass
