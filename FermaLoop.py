@@ -2532,23 +2532,35 @@ class LoopCrossfadeGUI:
             self.drag_mode = "pending"  # resolved to "new" selection or a playhead click on release
             self.drag_anchor_x = event.x
 
-    def _snap_selection_edge(self, sample):
+    def _snap_selection_edge(self, sample, other_edge_sample=None):
         """Selection edges always snap to the nearest zero crossing -- for
         this app specifically (crossfaded loop points), there's no real
         case where a non-zero-crossing edge is preferable, so this isn't
         an optional toggle. The search radius scales with the current
-        zoom level (roughly 2 pixels' worth of samples), so it never
-        visibly moves the edge further than what's already imperceptible
-        at the current zoom -- tight at extreme zoom, wider when zoomed
-        out, capped at a quarter-second so it can't search unreasonably
-        far when fully zoomed out."""
+        zoom level, with a wide-enough capture radius (~10 pixels' worth
+        of samples) to feel like a genuine magnetic snap rather than raw
+        mouse precision -- tight at extreme zoom, wider when zoomed out,
+        capped at a quarter-second so it can't search unreasonably far
+        when fully zoomed out.
+
+        When other_edge_sample is given (the OTHER end of the selection,
+        already placed), prefers a zero-crossing whose slope direction
+        matches the waveform's direction there -- so the loop seam
+        continues in the same apparent direction of motion rather than
+        reversing right at the wrap point. This is only ever a preference
+        on top of an already amplitude-safe candidate; see
+        _nearest_zero_crossing_directional for how the fallback works."""
         if self.data is None:
             return sample
         vs, ve = self._visible_range()
         w = max(1, self.canvas.winfo_width() or self.canvas_width)
         per_pixel = max(1, (ve - vs) / w)
-        window = max(1, min(int(per_pixel * 2), int(self.sr * 0.25)))
-        return self._nearest_zero_crossing(self.data, self.sr, sample, max_window_samples=window)
+        window = max(1, min(int(per_pixel * 10), int(self.sr * 0.25)))
+        preferred_direction = None
+        if other_edge_sample is not None:
+            preferred_direction = self._local_slope_direction(self.data, self.sr, other_edge_sample)
+        return self._nearest_zero_crossing_directional(self.data, self.sr, sample, window,
+                                                         preferred_direction=preferred_direction)
 
     def _on_canvas_drag(self, event):
         if self.data is None or self.drag_mode is None:
@@ -2563,16 +2575,18 @@ class LoopCrossfadeGUI:
             self.sel_end = self.sel_start
 
         if self.drag_mode == "start":
-            self.sel_start = self._snap_selection_edge(min(samp, self.sel_end))
+            self.sel_start = self._snap_selection_edge(min(samp, self.sel_end), other_edge_sample=self.sel_end)
         elif self.drag_mode == "end":
-            self.sel_end = self._snap_selection_edge(max(samp, self.sel_start))
+            self.sel_end = self._snap_selection_edge(max(samp, self.sel_start), other_edge_sample=self.sel_start)
         elif self.drag_mode == "new":
+            # the anchor (wherever the drag started) has nothing to match
+            # yet, so it just takes the nearest amplitude-safe point; the
+            # end you're actively dragging then prefers matching ITS
+            # direction, once it's been placed
             anchor_samp = self._x_to_sample(self.drag_anchor_x, w)
-            lo, hi = min(anchor_samp, samp), max(anchor_samp, samp)
-            self.sel_start = self._snap_selection_edge(lo)
-            self.sel_end = self._snap_selection_edge(hi)
-            if self.sel_start > self.sel_end:  # extremely unlikely, but stay safe
-                self.sel_start, self.sel_end = self.sel_end, self.sel_start
+            snapped_anchor = self._snap_selection_edge(anchor_samp)
+            snapped_moving = self._snap_selection_edge(samp, other_edge_sample=snapped_anchor)
+            self.sel_start, self.sel_end = min(snapped_anchor, snapped_moving), max(snapped_anchor, snapped_moving)
 
         if self.drag_mode in ("start", "end", "new"):
             self._update_selection_duration_label()
@@ -2590,6 +2604,76 @@ class LoopCrossfadeGUI:
         frac = max(0.0, min(1.0, frac))
         total = self.player.data.shape[0]
         return int(frac * total)
+
+    def _local_slope_direction(self, data, sr, sample, probe_ms=1.0):
+        """Classifies the local waveform trend at `sample` as +1 (rising)
+        or -1 (falling), using the mono mix -- direction needs one
+        definitive answer, unlike the amplitude-closeness check elsewhere
+        which deliberately uses the per-channel max to catch out-of-phase
+        content. Returns None if the mono mix is too flat locally to call
+        a direction (near-silence, or content that happens to sit exactly
+        out-of-phase so the mix reads as flat) -- callers must treat None
+        as "no preference," not guess a direction from noise."""
+        if data is None or len(data) == 0:
+            return None
+        n = len(data)
+        probe = max(4, int(sr * probe_ms / 1000))
+        lo = max(0, sample - probe)
+        hi = min(n, sample + probe)
+        if hi - lo < 2:
+            return None
+        seg = data[lo:hi]
+        mono = seg.mean(axis=1) if seg.ndim > 1 else seg
+        diff = float(mono[-1] - mono[0])
+        if abs(diff) < 1e-4:
+            return None
+        return 1 if diff > 0 else -1
+
+    def _zero_crossing_candidates(self, data, sr, sample, window):
+        """Returns [(index, direction), ...] for every TRUE sign-change
+        zero crossing within [sample-window, sample+window] (mono mix),
+        direction +1 for rising (neg->pos), -1 for falling (pos->neg)."""
+        n = len(data)
+        lo = max(0, sample - window)
+        hi = min(n, sample + window)
+        if hi - lo < 2:
+            return []
+        seg = data[lo:hi]
+        mono = seg.mean(axis=1) if seg.ndim > 1 else seg
+        signs = np.sign(mono)
+        candidates = []
+        for i in range(len(mono) - 1):
+            if signs[i] == 0 or signs[i] == signs[i + 1] or signs[i + 1] == 0:
+                continue
+            direction = 1 if mono[i + 1] > mono[i] else -1
+            candidates.append((lo + i + 1, direction))
+        return candidates
+
+    def _nearest_zero_crossing_directional(self, data, sr, sample, max_window_samples,
+                                            preferred_direction=None, max_ratio=2.5):
+        """Amplitude-closeness (via _nearest_zero_crossing) is always the
+        non-negotiable floor -- this only ever adds a PREFERENCE on top of
+        it. When preferred_direction is given, prefers the nearest TRUE
+        zero-crossing of that direction, unless it's more than max_ratio
+        times farther away than the plain nearest-amplitude point -- so
+        matching direction can only ever be a bonus on an already-good
+        candidate, never a trade against actual click-safety."""
+        baseline = self._nearest_zero_crossing(data, sr, sample, max_window_samples=max_window_samples)
+        if preferred_direction is None or data is None:
+            return baseline
+        window = max(1, int(max_window_samples))
+        matching = [c for c in self._zero_crossing_candidates(data, sr, sample, window)
+                    if c[1] == preferred_direction]
+        if not matching:
+            return baseline
+        best_idx, _ = min(matching, key=lambda c: abs(c[0] - sample))
+        baseline_dist = abs(baseline - sample)
+        best_dist = abs(best_idx - sample)
+        if baseline_dist == 0:
+            return best_idx if best_dist <= 1 else baseline
+        if best_dist <= baseline_dist * max_ratio:
+            return best_idx
+        return baseline
 
     def _nearest_zero_crossing(self, data, sr, sample, window_ms=15, max_window_samples=None):
         """Finds the sample index within a small window around `sample`
@@ -2639,26 +2723,45 @@ class LoopCrossfadeGUI:
             w = self.canvas.winfo_width()
             samp = self._x_to_sample(event.x, w)
             samp = max(0, min(samp, len(self.data)))
-            # cap the zero-crossing search to a quarter of what's currently
-            # visible, so at extreme zoom the snap can't jump the cursor
-            # somewhere off-screen (which looked like clicking just did
-            # nothing, when it had actually moved -- just nowhere visible)
+            # cap the zero-crossing search to a fraction of a pixel's worth
+            # of samples (matching _snap_selection_edge's formula) so at
+            # extreme zoom the snap can't jump the cursor somewhere
+            # off-screen (which looked like clicking did nothing, when it
+            # had actually moved -- just nowhere visible)
             vs, ve = self._visible_range()
-            zc_cap = max(1, (ve - vs) // 4)
+            w_px = max(1, self.canvas.winfo_width() or self.canvas_width)
+            per_pixel = max(1, (ve - vs) / w_px)
+            zc_cap = max(1, min(int(per_pixel * 10), int(self.sr * 0.25)))
+            # while actively playing, prefer a landing point that continues
+            # in the SAME direction the waveform was already moving right
+            # before the click -- reduces the tick further than amplitude-
+            # closeness alone: fading from silence into a point moving the
+            # OPPOSITE way still reverses the apparent motion at the splice
+            outgoing_direction = None
+            if self.player.playing:
+                # use the PLAYER's own current buffer/cursor, not always
+                # self.data -- during audition, player.cursor is in the
+                # short preview buffer's own coordinate space, not raw
+                # self.data space, so pairing self.data with player.cursor
+                # here would silently compute a meaningless direction
+                outgoing_direction = self._local_slope_direction(
+                    self.player.data, self.player.sr, self.player.cursor)
             if self.preview_mode and self.sel_start <= samp < self.sel_end:
                 # clicking WITHIN the loop region while auditioning: stay in
                 # preview mode (don't fall back to raw/unprocessed audio) --
                 # this is what lets you scrub right up to the loop-back
                 # point and hear the actual crossfaded wrap
                 preview_cursor = self._raw_to_preview_cursor(samp)
-                preview_cursor = self._nearest_zero_crossing(self.player.data, self.player.sr,
-                                                               preview_cursor, max_window_samples=zc_cap)
+                preview_cursor = self._nearest_zero_crossing_directional(
+                    self.player.data, self.player.sr, preview_cursor, zc_cap,
+                    preferred_direction=outgoing_direction)
                 self.player.set_cursor(preview_cursor)
             else:
                 # clicking outside the loop region: always operate on raw
                 # audio, so you can freely check surrounding context
                 self._exit_preview_mode()
-                snapped = self._nearest_zero_crossing(self.data, self.sr, samp, max_window_samples=zc_cap)
+                snapped = self._nearest_zero_crossing_directional(
+                    self.data, self.sr, samp, zc_cap, preferred_direction=outgoing_direction)
                 self.player.set_cursor(snapped)
             self._show_click_flag(event.x, samp)
             self._redraw()
