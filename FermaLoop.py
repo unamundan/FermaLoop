@@ -1405,6 +1405,33 @@ def render_icon_image(name, size, color_hex, supersample=6, rotation_deg=0):
         draw.line([(pad, pad + L), (pad, pad), (pad + L, pad)], fill=color, width=w, joint="curve")
         draw.line([(sw - pad, sw - pad - L), (sw - pad, sw - pad), (sw - pad - L, sw - pad)],
                    fill=color, width=w, joint="curve")
+    elif name == "gear":
+        # classic settings gear: a polygon alternating between an outer
+        # (base-of-tooth) radius and a tip-of-tooth radius around the
+        # circle, then a transparent circle "punched" through the center
+        # -- correct since the canvas is RGBA, so erasing back to
+        # (0,0,0,0) leaves a true hole regardless of what's behind the
+        # icon when it's later composited, rather than needing to match
+        # a specific background color.
+        import math
+        n_teeth = 8
+        outer_r = sw * 0.30    # base circle radius, between teeth
+        tip_r = sw * 0.40      # tooth tip radius
+        tooth_half = math.pi / n_teeth * 0.34
+        points = []
+        for i in range(n_teeth):
+            base_angle = 2 * math.pi * i / n_teeth
+            a0 = base_angle - tooth_half
+            a1 = base_angle - tooth_half * 0.42
+            a2 = base_angle + tooth_half * 0.42
+            a3 = base_angle + tooth_half
+            points.append((cx + outer_r * math.cos(a0), cy + outer_r * math.sin(a0)))
+            points.append((cx + tip_r * math.cos(a1), cy + tip_r * math.sin(a1)))
+            points.append((cx + tip_r * math.cos(a2), cy + tip_r * math.sin(a2)))
+            points.append((cx + outer_r * math.cos(a3), cy + outer_r * math.sin(a3)))
+        draw.polygon(points, fill=color)
+        hole_r = sw * 0.135
+        draw.ellipse([cx - hole_r, cy - hole_r, cx + hole_r, cy + hole_r], fill=(0, 0, 0, 0))
     elif name == "info":
         # lowercase serif "i" -- drawn geometrically (stem + serif feet +
         # dot) rather than via a font, so it doesn't depend on a specific
@@ -2379,7 +2406,7 @@ class LoopCrossfadeGUI:
 
         header_row = ttk.Frame(outer); header_row.pack(fill="x", pady=(0, 10))
         ttk.Label(header_row, text="FermaLoop", style="Heading.TLabel").pack(side="left")
-        btn_gear = self._make_icon_button(header_row, "info", "Hints & Keyboard Shortcuts",
+        btn_gear = self._make_icon_button(header_row, "gear", "Prefs and Help",
                                            self.open_shortcuts_dialog, size=20)
         btn_gear.pack(side="right")
 
@@ -3898,15 +3925,22 @@ class LoopCrossfadeGUI:
         tk, ttk = self.tk, self.ttk
         dlg = tk.Toplevel(self.root)
         self._shortcuts_dialog = dlg
-        dlg.title("Hints & Keyboard Shortcuts")
+        dlg.title("Prefs and Help")
         dlg.configure(bg=BG)
         dlg.transient(self.root)
 
         content = tk.Frame(dlg, bg=BG)
         content.pack(fill="both", expand=True)
 
+        tooltip_toggle = RoundedCheckbutton(content, "Show hover tooltips", self.tooltips_enabled_var,
+                                             BG, FG, FIELD_BG, ACCENT, BORDER,
+                                             command=self._on_tooltips_toggle)
+        tooltip_toggle.pack(anchor="w", padx=12, pady=(12, 10))
+
+        tk.Frame(content, height=1, bg=BORDER).pack(fill="x", padx=12, pady=(0, 8))
+
         ttk.Label(content, text="HINTS", background=BG, foreground=FG,
-                  font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=12, pady=(10, 4))
+                  font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=12, pady=(0, 4))
         for hint in ("Drag to select",
                      "Drag edges to adjust",
                      "Click in waveform to move playhead",
@@ -3916,11 +3950,6 @@ class LoopCrossfadeGUI:
                      "Crop and save"):
             ttk.Label(content, text=f"\u2022 {hint}", background=BG, foreground=MUTED,
                       font=("Segoe UI", 9)).pack(anchor="w", padx=22, pady=1)
-
-        tooltip_toggle = RoundedCheckbutton(content, "Show hover tooltips", self.tooltips_enabled_var,
-                                             BG, FG, FIELD_BG, ACCENT, BORDER,
-                                             command=self._on_tooltips_toggle)
-        tooltip_toggle.pack(anchor="w", padx=12, pady=(6, 2))
 
         tk.Frame(content, height=1, bg=BORDER).pack(fill="x", padx=12, pady=(10, 8))
 
@@ -3933,10 +3962,10 @@ class LoopCrossfadeGUI:
         rows = {}
         for i, (name, label) in enumerate(SHORTCUT_LABELS.items()):
             ttk.Label(shortcuts_frame, text=label, background=BG, foreground=FG).grid(
-                row=i, column=0, sticky="w", pady=3)
+                row=i, column=0, sticky="w", pady=1)
             raw_key = self.shortcuts.get(name, DEFAULT_SHORTCUTS[name])
             btn = ttk.Button(shortcuts_frame, text=format_key_for_display(raw_key), width=14)
-            btn.grid(row=i, column=1, padx=(10, 0), pady=3)
+            btn.grid(row=i, column=1, padx=(10, 0), pady=1)
             rows[name] = btn
 
         def start_listening(name, btn):
@@ -3971,8 +4000,14 @@ class LoopCrossfadeGUI:
         # move rather than snapping instantly), and wasn't worth the
         # complexity or risk it kept introducing. It's still fully
         # draggable by hand once open, same as any other window. ----
+        # y uses winfo_y(), NOT winfo_rooty(): rooty gives the top of the
+        # window's CONTENT area (below the titlebar), which is why this
+        # dialog was consistently appearing offset downward by roughly
+        # the titlebar's height on both macOS and Windows instead of
+        # flush with the actual top of the main window. winfo_y() gives
+        # the position of the window frame itself, titlebar included.
         x = self.root.winfo_rootx() + self.root.winfo_width() + 10
-        y = self.root.winfo_rooty()
+        y = self.root.winfo_y()
         dlg.geometry(f"{w}x{h}+{x}+{y}")
         dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))  # defensive re-apply against WM timing quirks
 
