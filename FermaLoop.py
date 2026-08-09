@@ -3635,17 +3635,18 @@ class LoopCrossfadeGUI:
                 self.root.geometry(f"{w}x{h}")
         else:
             self.root.geometry(f"{w}x{h}")
-        # NOTE: minsize's width is deliberately much smaller than
-        # required_w. required_w reflects the window's natural size with
-        # the CURVE/XFADE/LOOP row laid out at its most generous width --
-        # using that as the minimum would mean the window could grow but
-        # never shrink back below its own starting size, since minsize()
-        # is a hard floor. The three boxes are responsive and redraw
-        # themselves to fit narrower space on their own (each still has
-        # its own internal floor so it won't visually break), so the
-        # window itself doesn't need to stay pinned at their widest case.
-        min_w = min(required_w, 480)
-        self.root.minsize(min_w, required_h)
+        # required_w correctly reflects the TRUE minimum comfortable
+        # width -- including the CURVE/XFADE/LOOP row's own natural
+        # content width, which their backgrounds are deliberately never
+        # drawn narrower than (see _finalize_responsive_section). An
+        # earlier version of this capped the minimum at an arbitrary
+        # 480px to let the window shrink further -- but that let the
+        # window be dragged narrower than the layout can actually
+        # support without clipping, which is exactly what that caused.
+        # The boxes stretching wider on a larger window is the real
+        # responsive win here; letting the window shrink below what the
+        # content can honestly fit was never a good trade.
+        self.root.minsize(required_w, required_h)
 
     def _on_close(self):
         try:
