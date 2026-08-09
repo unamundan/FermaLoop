@@ -111,6 +111,27 @@ import threading
 import subprocess
 import numpy as np
 
+# TEMPORARY diagnostic: a previous fix to the CURVE/XFADE/LOOP boxes'
+# redundant rendering (see _apply_saved_or_natural_size) didn't fully
+# resolve a reported multi-second delay before those boxes appear at
+# launch -- meaning some of that delay likely lives somewhere else in
+# startup entirely. Rather than guess again, this times the WHOLE launch
+# sequence from module import through the final render, all on one
+# shared clock, so the actual bottleneck shows up concretely in
+# ~/fermaloop_startup_debug.txt instead of being theorized about
+# further. Safe to remove once we have that data.
+_STARTUP_T0 = time.perf_counter()
+
+
+def _log_startup(label):
+    try:
+        elapsed = time.perf_counter() - _STARTUP_T0
+        log_path = os.path.join(os.path.expanduser("~"), "fermaloop_startup_debug.txt")
+        with open(log_path, "a") as f:
+            f.write(f"  [{elapsed:8.4f}s since module import began] {label}\n")
+    except Exception:
+        pass
+
 
 def _find_ffmpeg():
     """Looks for a copy of ffmpeg bundled alongside a packaged (frozen)
@@ -127,6 +148,7 @@ def _find_ffmpeg():
 
 
 FFMPEG_PATH = _find_ffmpeg()
+_log_startup("FFMPEG_PATH resolved (module-level, before any GUI code runs)")
 SUPPORTED_EXTS = {".wav", ".aif", ".aiff", ".mp3", ".mp4", ".m4a", ".flac"}
 
 # The three output formats the GUI's Format selector offers (input loading
@@ -2016,14 +2038,17 @@ class LoopCrossfadeGUI:
     ICON_SIZE = 26  # transport icons sized to roughly fill the button height
 
     def __init__(self):
+        _log_startup("LoopCrossfadeGUI.__init__ starting")
         import tkinter as tk
         from tkinter import filedialog, messagebox, ttk
         self.tk, self.filedialog, self.messagebox, self.ttk = tk, filedialog, messagebox, ttk
 
         self.root = TkinterDnD.Tk() if DND_AVAILABLE else tk.Tk()
+        _log_startup("tk root window created")
         self.root.title("FermaLoop")
         self.root.configure(bg=BG)
         self.window_sizes = load_window_sizes()
+        _log_startup("load_window_sizes() done")
         # tooltip on/off preference lives in the same JSON as window
         # sizes/positions rather than a dedicated file, since it's a
         # single small boolean and this file is already loaded/saved at
@@ -2032,6 +2057,7 @@ class LoopCrossfadeGUI:
         self.tooltips_enabled_var = tk.BooleanVar(value=ToolTip.enabled)
 
         self._build_style()
+        _log_startup("_build_style() done")
 
         # ---- state ----
         self.data = None           # currently loaded (possibly cropped) audio, float64 (n, ch)
@@ -2060,6 +2086,7 @@ class LoopCrossfadeGUI:
         self._play_tooltip = None
         self.player = AudioPlayer()
         self.shortcuts = load_shortcuts()
+        _log_startup("AudioPlayer() + load_shortcuts() done")
 
         self.in_path_var = tk.StringVar()
         self.out_path_var = tk.StringVar()
@@ -2089,11 +2116,15 @@ class LoopCrossfadeGUI:
         self.format_var.trace_add("write", self._on_format_changed)
 
         self._build_widgets()
+        _log_startup("_build_widgets() done (icon rendering, all box construction)")
         self._bind_shortcuts()
+        _log_startup("_bind_shortcuts() done")
         if DND_AVAILABLE:
             self._enable_drag_and_drop()
+            _log_startup("_enable_drag_and_drop() done")
 
         self._apply_saved_or_natural_size()
+        _log_startup("_apply_saved_or_natural_size() done -- launch sequence complete")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._poll_playhead()
@@ -4119,37 +4150,9 @@ class LoopCrossfadeGUI:
         """Sizes the window to fit everything on first paint (no manual
         resize needed), while respecting a larger size -- and now also a
         saved position -- the user may have deliberately set last time."""
-        # TEMPORARY diagnostic: this exact area has now had one incomplete
-        # fix already (redraw suppression that missed a direct redraw()
-        # call bypassing it). Rather than guess at a second/third
-        # optimization blind, log where the actual wall-clock time goes
-        # through this whole method, so any REMAINING bottleneck (PIL
-        # render cost itself, icon loading, something in update()/
-        # update_idletasks() being inherently slower on this specific
-        # machine/macOS version, etc.) shows up concretely instead of
-        # being theorized about. Safe to remove once we have that data.
-        import time as _time
-        _t0 = _time.perf_counter()
-
-        def _mark(label):
-            try:
-                log_path = os.path.join(os.path.expanduser("~"), "fermaloop_startup_debug.txt")
-                with open(log_path, "a") as f:
-                    f.write(f"  {label}: {_time.perf_counter() - _t0:.4f}s elapsed\n")
-            except Exception:
-                pass
-
-        try:
-            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_startup_debug.txt")
-            with open(log_path, "a") as f:
-                import datetime
-                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
-                        f"_apply_saved_or_natural_size starting\n")
-        except Exception:
-            pass
-
+        _log_startup("_apply_saved_or_natural_size: starting")
         self.root.update_idletasks()
-        _mark("after initial update_idletasks()")
+        _log_startup("_apply_saved_or_natural_size: after initial update_idletasks()")
 
         # Measure the STACKED-mode size first (CURVE/XFADE/LOOP stacked
         # vertically) -- this becomes BOTH the default "narrowest
@@ -4193,11 +4196,11 @@ class LoopCrossfadeGUI:
             # Explicitly setting it here forces an accurate reading of
             # the box's real natural content width for this measurement.
             box_outer._rc["canvas"].configure(width=box_outer._rc["natural_w"])
-        _mark("after measurement-phase pack/configure loop (no renders should have fired)")
+        _log_startup("_apply_saved_or_natural_size: after measurement-phase pack/configure loop (no renders should have fired)")
         self._box_layout_mode = "stacked"
         self.root.update()  # full update -- reqwidth needs a real event
                              # pass to settle and reflect this pack change
-        _mark("after self.root.update() (forced full event processing)")
+        _log_startup("_apply_saved_or_natural_size: after self.root.update() (forced full event processing)")
         stacked_w = self.root.winfo_reqwidth()
         stacked_h = self.root.winfo_reqheight()
 
@@ -4211,7 +4214,7 @@ class LoopCrossfadeGUI:
                 self.root.geometry(f"{w}x{h}")
         else:
             self.root.geometry(f"{w}x{h}")
-        _mark("after applying final geometry()")
+        _log_startup("_apply_saved_or_natural_size: after applying final geometry()")
 
         # restore each canvas's real <Configure> binding NOW, right
         # before the one layout pass that actually needs to be seen
@@ -4221,7 +4224,7 @@ class LoopCrossfadeGUI:
         self._box_layout_mode = None  # forces _update_box_layout to re-evaluate for the actual applied size
         self._update_box_layout()
         self.root.minsize(stacked_w, stacked_h)
-        _mark("after final _update_box_layout() -- the one real, visible render pass")
+        _log_startup("_apply_saved_or_natural_size: after final _update_box_layout() -- the one real, visible render pass")
 
     def _on_close(self):
         try:
