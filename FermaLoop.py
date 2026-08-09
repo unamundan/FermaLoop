@@ -3722,8 +3722,37 @@ class LoopCrossfadeGUI:
             box_outer.pack(fill="x", pady=(0, 6))
             self._set_box_height(box_outer, box_outer._rc["natural_h"])
         self._box_layout_mode = "stacked"
-        self.root.update_idletasks()
+        self.root.update()  # full update, not just idle tasks -- the
+                             # responsive canvases' own <Configure> bindings
+                             # may need a real event-processing pass to
+                             # settle before reqwidth reflects the new layout
         min_w = self.root.winfo_reqwidth()
+
+        # DIAGNOSTIC: capture the measurement made WHILE actually in the
+        # forced-stacked state (not after restoring), since the previous
+        # round's log only showed the post-restore numbers and couldn't
+        # tell us whether stacking had any effect on reqwidth at all
+        try:
+            import datetime
+            lines = [f"[{datetime.datetime.now()}] STACKED-STATE measurement (before restore)",
+                     f"cols_row.winfo_reqwidth() while stacked: {self._cols_row.winfo_reqwidth()}",
+                     f"root.winfo_reqwidth() while stacked (this becomes min_w): {min_w}"]
+            for i, (box_outer, box_inner) in enumerate(self._box_pairs):
+                box_outer.update_idletasks()
+                lines.append(f"  box[{i}] outer.winfo_reqwidth()={box_outer.winfo_reqwidth()}, "
+                             f"canvas.winfo_reqwidth()={box_outer._rc['canvas'].winfo_reqwidth()}, "
+                             f"inner.winfo_reqwidth()={box_inner.winfo_reqwidth()}, "
+                             f"stored natural_w={box_outer._rc.get('natural_w')}")
+            log_text = "\n".join(lines) + "\n" + "=" * 60 + "\n"
+            for log_path in (os.path.join(os.path.expanduser("~"), "fermaloop_width_debug.txt"),
+                              os.path.join(os.getcwd(), "fermaloop_width_debug.txt")):
+                try:
+                    with open(log_path, "a") as f:
+                        f.write(log_text)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         self._box_layout_mode = None  # forces _update_box_layout to re-evaluate for real
         self._update_box_layout()
