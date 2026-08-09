@@ -2097,6 +2097,7 @@ class LoopCrossfadeGUI:
         tk, ttk = self.tk, self.ttk
         outer = ttk.Frame(self.root, padding=16)
         outer.pack(fill="both", expand=True)
+        self._outer_frame = outer
 
         header_row = ttk.Frame(outer); header_row.pack(fill="x", pady=(0, 10))
         ttk.Label(header_row, text="FermaLoop", style="Heading.TLabel").pack(side="left")
@@ -2300,8 +2301,18 @@ class LoopCrossfadeGUI:
         btn_process.pack(fill="x", pady=(8, 8))
         ToolTip(btn_process, "Crossfade the current selection and save it to the 'Save as' path")
 
-        ttk.Label(outer, textvariable=self.status_var, style="Muted.TLabel",
-                  wraplength=700, justify="left").pack(anchor="w", fill="x")
+        # wraplength is deliberately NOT a fixed value here: Tk labels
+        # with a hardcoded wraplength can reserve that much width up
+        # front regardless of current text content, which was silently
+        # keeping the window's true minimum width wide (700px) no matter
+        # what the CURVE/XFADE/LOOP row's own stacking logic did -- an
+        # entirely separate, unrelated source of the same "can't shrink"
+        # symptom. Binding it to the actual available width instead
+        # means it only ever wraps to fit what's really there.
+        status_label = ttk.Label(outer, textvariable=self.status_var, style="Muted.TLabel",
+                                  wraplength=400, justify="left")
+        status_label.pack(anchor="w", fill="x")
+        outer.bind("<Configure>", lambda e: status_label.configure(wraplength=max(200, e.width - 32)), add="+")
 
         notes = []
         if not ffmpeg_available():
@@ -2313,8 +2324,10 @@ class LoopCrossfadeGUI:
         if not PIL_AVAILABLE:
             notes.append("Pillow not installed -- waveform draws with plain lines instead of smoothed fill (pip install Pillow).")
         if notes:
-            ttk.Label(outer, text=" / ".join(notes), style="Muted.TLabel",
-                      foreground="#e2a33d", wraplength=700, justify="left").pack(anchor="w", pady=(8, 0))
+            notes_label = ttk.Label(outer, text=" / ".join(notes), style="Muted.TLabel",
+                                     foreground="#e2a33d", wraplength=400, justify="left")
+            notes_label.pack(anchor="w", pady=(8, 0))
+            outer.bind("<Configure>", lambda e: notes_label.configure(wraplength=max(200, e.width - 32)), add="+")
 
     def _toggle_window_entry(self):
         self.window_entry.configure(state="normal" if self.snap_var.get() else "disabled")
@@ -3715,6 +3728,30 @@ class LoopCrossfadeGUI:
         self._box_layout_mode = None  # forces _update_box_layout to re-evaluate for real
         self._update_box_layout()
         self.root.minsize(min_w, required_h)
+
+        # DIAGNOSTIC: this exact area has now been guessed at wrong twice
+        # (an arbitrary 480px cap, then a stacking fix that apparently
+        # didn't fully resolve it either). Rather than guess a third time,
+        # log the actual reqwidth of every direct child of `outer` so we
+        # can see EXACTLY which row is keeping the minimum wide, instead
+        # of continuing to theorize about it.
+        try:
+            import datetime
+            lines = [f"[{datetime.datetime.now()}] window minsize width diagnostic",
+                     f"final min_w used for minsize(): {min_w}"]
+            for child in self._outer_frame.winfo_children():
+                child.update_idletasks()
+                lines.append(f"  {child} ({child.winfo_class()}): reqwidth={child.winfo_reqwidth()}")
+            log_text = "\n".join(lines) + "\n" + "=" * 60 + "\n"
+            for log_path in (os.path.join(os.path.expanduser("~"), "fermaloop_width_debug.txt"),
+                              os.path.join(os.getcwd(), "fermaloop_width_debug.txt")):
+                try:
+                    with open(log_path, "a") as f:
+                        f.write(log_text)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _on_close(self):
         try:
