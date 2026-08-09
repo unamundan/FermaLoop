@@ -671,6 +671,7 @@ DEFAULT_SHORTCUTS = {
     "zoom_in": "equal",
     "zoom_out": "minus",
     "zoom_fit": "0",
+    "zoom_selection": "9",
     "stretch": "x",
 }
 
@@ -686,6 +687,7 @@ SHORTCUT_LABELS = {
     "zoom_in": "Zoom In (Scroll Up)",
     "zoom_out": "Zoom Out (Scroll Down)",
     "zoom_fit": "Zoom to Fit",
+    "zoom_selection": "Zoom to Selection",
     "stretch": "PaulXStretch...",
 }
 
@@ -3346,16 +3348,6 @@ class LoopCrossfadeGUI:
         self._redraw()
 
     def zoom_to_fit(self):
-        # TEMPORARY diagnostic: confirms whether this is even being
-        # reached at all when "0" is pressed, vs. a binding-delivery
-        # issue upstream of this function ever running. Safe to remove
-        # once we know which side of that line the problem is on.
-        try:
-            import datetime
-            self.status_var.set(f"zoom_to_fit() called at {datetime.datetime.now().strftime('%H:%M:%S')} "
-                                 f"-- data loaded: {self.data is not None}")
-        except Exception:
-            pass
         if self.data is None:
             return
         self.zoom_start, self.zoom_end = 0, len(self.data)
@@ -3769,6 +3761,7 @@ class LoopCrossfadeGUI:
             "zoom_in": lambda: self._zoom_step(1),
             "zoom_out": lambda: self._zoom_step(-1),
             "zoom_fit": self.zoom_to_fit,
+            "zoom_selection": self.zoom_to_selection,
             "stretch": self.open_stretch_dialog,
         }
 
