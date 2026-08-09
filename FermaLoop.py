@@ -976,6 +976,25 @@ class AudioPlayer:
                 self._apply_bounds_from_cursor()
 
     def _callback(self, outdata, frames, time_info, status):
+        # TEMPORARY diagnostic: sounddevice passes a non-empty `status`
+        # when something like an output underflow occurs -- logging this
+        # (with a timestamp and how many were in a row) will tell us
+        # definitively whether the post-crop "pops" are buffer underruns
+        # (the callback not producing frames fast enough for the driver)
+        # rather than a logic bug in what samples get produced. Safe to
+        # remove once we know which side of that line the problem is on.
+        if status:
+            try:
+                import datetime
+                self._underrun_count = getattr(self, "_underrun_count", 0) + 1
+                if self._underrun_count <= 30:  # cap to avoid flooding the log
+                    log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
+                    with open(log_path, "a") as f:
+                        f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
+                                f"callback status={status} (#{self._underrun_count}), "
+                                f"frames requested={frames}\n")
+            except Exception:
+                pass
         with self.lock:
             if self.data is None:
                 outdata[:] = 0
