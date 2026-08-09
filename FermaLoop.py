@@ -1199,6 +1199,23 @@ def render_checkbox_image(w, h, radius, checked, field_bg_hex, accent_hex, borde
     return img.resize((w, h), Image.LANCZOS)
 
 
+def render_radio_image(size, selected, bg_hex, accent_hex, muted_hex, supersample=6):
+    """Anti-aliased circular radio-button indicator: filled accent dot
+    when selected, empty muted-outline ring otherwise."""
+    size = max(1, int(size))
+    sw = size * supersample
+    img = Image.new("RGBA", (sw, sw), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    cx = cy = sw / 2
+    r = sw * 0.42
+    color = _hex_to_rgb(accent_hex) if selected else _hex_to_rgb(muted_hex)
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color + (255,), width=max(2, int(sw * 0.09)))
+    if selected:
+        ir = r * 0.5
+        draw.ellipse([cx - ir, cy - ir, cx + ir, cy + ir], fill=color + (255,))
+    return img.resize((size, size), Image.LANCZOS)
+
+
 def render_icon_image(name, size, color_hex, supersample=6, rotation_deg=0):
     """Simple vector-style transport/tool icons (play, pause, stop, loop,
     repeat, stretch, crop), drawn via PIL and supersampled for clean anti-
@@ -1399,7 +1416,7 @@ class RoundedCheckbutton:
         self.frame = tk.Frame(parent, bg=bg)
         self.canvas = tk.Canvas(self.frame, width=box, height=box, bg=bg, highlightthickness=0)
         self.canvas.pack(side="left")
-        self.label = tk.Label(self.frame, text=text, bg=bg, fg=fg, font=("Segoe UI", 10))
+        self.label = tk.Label(self.frame, text=text, bg=bg, fg=fg, font=("Segoe UI", 10), justify="left")
         self.label.pack(side="left", padx=(6, 0))
         self.canvas.bind("<Button-1>", self._toggle)
         self.label.bind("<Button-1>", self._toggle)
@@ -1426,6 +1443,63 @@ class RoundedCheckbutton:
         self._draw()
         if self.command:
             self.command()
+
+    def pack(self, **kw):
+        self.frame.pack(**kw)
+
+
+class RoundedRadio:
+    """A radio-button-style selector: a circular indicator (filled when
+    selected) plus a text label. `is_selected_fn` (not a single shared
+    Variable) decides whether THIS option is the active one -- this
+    keeps it usable for boolean-backed choices (e.g. Auto/Manual, which
+    is really just one BooleanVar) as well as genuine multi-value
+    StringVars (e.g. Equal power/Linear), without needing two different
+    widget classes. Call refresh() on every RoundedRadio in a group
+    whenever any one of them is clicked, so they all update in sync."""
+
+    def __init__(self, parent, text, is_selected_fn, on_click, bg, fg, accent, muted,
+                 command=None, size=16):
+        import tkinter as tk
+        self.tk = tk
+        self.text = text
+        self.is_selected_fn = is_selected_fn
+        self.on_click = on_click
+        self.bg, self.fg, self.accent, self.muted = bg, fg, accent, muted
+        self.size = size
+        self.command = command
+        self._photo = None
+
+        self.frame = tk.Frame(parent, bg=bg)
+        self.canvas = tk.Canvas(self.frame, width=size, height=size, bg=bg, highlightthickness=0)
+        self.canvas.pack(side="left")
+        self.label = tk.Label(self.frame, text=text, bg=bg, fg=fg, font=("Segoe UI", 10))
+        self.label.pack(side="left", padx=(6, 0))
+        self.canvas.bind("<Button-1>", self._click)
+        self.label.bind("<Button-1>", self._click)
+        self.refresh()
+
+    def _click(self, event=None):
+        self.on_click()
+        if self.command:
+            self.command()
+
+    def refresh(self):
+        selected = self.is_selected_fn()
+        self.canvas.delete("all")
+        if PIL_AVAILABLE:
+            img = render_radio_image(self.size, selected, self.bg, self.accent, self.muted)
+            self._photo = ImageTk.PhotoImage(img)
+            self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
+        else:
+            r = self.size * 0.42
+            cx = cy = self.size / 2
+            color = self.accent if selected else self.muted
+            self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, outline=color, width=2)
+            if selected:
+                ir = r * 0.5
+                self.canvas.create_oval(cx - ir, cy - ir, cx + ir, cy + ir, fill=color, outline="")
+        self.label.configure(fg=self.fg if selected else self.muted)
 
     def pack(self, **kw):
         self.frame.pack(**kw)
@@ -1798,66 +1872,54 @@ class LoopCrossfadeGUI:
 
     def _on_auto_detect_clicked(self):
         self.auto_xfade_var.set(True)
-        self._rebuild_autodetect_manual_cards()
+        self._refresh_xfade_box()
         self._on_param_changed()
 
     def _on_manual_clicked(self):
         self.auto_xfade_var.set(False)
-        self._rebuild_autodetect_manual_cards()
+        self._refresh_xfade_box()
         self._on_param_changed()
 
-    def _rebuild_autodetect_manual_cards(self):
-        """Auto-detect and Manual crossfade are mutually exclusive (one
-        underlying bool, auto_xfade_var), presented as two 'cards' with a
-        distinct background shade from the rest of the section -- whichever
-        one is NOT currently active dims (muted colors) but stays fully
-        clickable, rather than being disabled outright."""
+    def _build_xfade_box(self, parent):
+        """Manual above Auto (Manual is the more commonly used option, and
+        defaults to selected). Both share one grid so the field/reference-
+        value column lines up regardless of which row is active. The
+        field-purpose labels ("Crossfade:") live in tooltips instead of
+        on-screen text, per the "hover-over help instead of cluttering
+        the interface with text" direction."""
         tk = self.tk
-        for child in self.auto_col_holder.winfo_children():
-            child.destroy()
-        for child in self.manual_col_holder.winfo_children():
-            child.destroy()
+        manual_radio = RoundedRadio(parent, "Manual", lambda: not self.auto_xfade_var.get(),
+                                     self._on_manual_clicked, PANEL, FG, ACCENT, MUTED)
+        manual_radio.frame.grid(row=0, column=0, sticky="w", pady=(0, 2))
+        ToolTip(manual_radio.frame, "Crossfade duration in seconds")
 
-        auto_on = self.auto_xfade_var.get()
-        CARD_BG_ACTIVE, CARD_BG_INACTIVE = FIELD_BG, "#1c1d20"
-        FG_ACTIVE, FG_INACTIVE = FG, MUTED
-        CHECK_ACTIVE, CHECK_INACTIVE = ACCENT, MUTED
-
-        # ---- Auto-detect card ----
-        a_bg = CARD_BG_ACTIVE if auto_on else CARD_BG_INACTIVE
-        a_fg = FG_ACTIVE if auto_on else FG_INACTIVE
-        a_check = CHECK_ACTIVE if auto_on else CHECK_INACTIVE
-        auto_card = tk.Frame(self.auto_col_holder, bg=a_bg)
-        auto_card.pack(fill="both", expand=True)
-        auto_proxy = tk.BooleanVar(value=auto_on)
-        auto_cb = RoundedCheckbutton(auto_card, "Auto-detect crossfade length", auto_proxy,
-                                      a_bg, a_fg, a_bg, a_check, BORDER, command=self._on_auto_detect_clicked)
-        auto_cb.pack(anchor="w", padx=10, pady=(10, 2))
-        ToolTip(auto_cb.frame, "Automatically pick the crossfade length that best matches\n"
-                                "the head and tail of the selection, instead of a fixed value")
-        auto_value_fg = FG_ACTIVE if auto_on else FG_INACTIVE
-        tk.Label(auto_card, textvariable=self.auto_xfade_value_var, bg=a_bg, fg=auto_value_fg,
-                 font=("Segoe UI", 9)).pack(anchor="w", padx=(34, 10), pady=(0, 10))
-
-        # ---- Manual card ----
-        m_bg = CARD_BG_ACTIVE if not auto_on else CARD_BG_INACTIVE
-        m_fg = FG_ACTIVE if not auto_on else FG_INACTIVE
-        m_check = CHECK_ACTIVE if not auto_on else CHECK_INACTIVE
-        manual_card = tk.Frame(self.manual_col_holder, bg=m_bg)
-        manual_card.pack(fill="both", expand=True)
-        manual_proxy = tk.BooleanVar(value=not auto_on)
-        manual_cb = RoundedCheckbutton(manual_card, "Manual crossfade", manual_proxy,
-                                        m_bg, m_fg, m_bg, m_check, BORDER, command=self._on_manual_clicked)
-        manual_cb.pack(anchor="w", padx=10, pady=(10, 4))
-        ToolTip(manual_cb.frame, "Crossfade duration in seconds (used when auto-detect is off)")
-        field_row = tk.Frame(manual_card, bg=m_bg)
-        field_row.pack(anchor="w", padx=10, pady=(0, 10))
-        entry_field_bg = FIELD_BG if not auto_on else "#232427"
-        self.xfade_entry = RoundedEntry(field_row, self.xfade_var, m_bg, entry_field_bg, m_fg, BORDER,
-                                         height=26, radius=7, width=64)
-        self.xfade_entry.pack(side="left")
+        self.xfade_entry = RoundedEntry(parent, self.xfade_var, PANEL, FIELD_BG, FG, BORDER,
+                                         height=26, radius=7, width=60)
+        self.xfade_entry.frame.grid(row=0, column=1, sticky="w", padx=(10, 0), pady=(0, 2))
         self._defocus_on_return(self.xfade_entry.entry)
+        ToolTip(self.xfade_entry.frame, "Crossfade duration in seconds")
 
+        auto_radio = RoundedRadio(parent, "Auto", lambda: self.auto_xfade_var.get(),
+                                   self._on_auto_detect_clicked, PANEL, FG, ACCENT, MUTED)
+        auto_radio.frame.grid(row=1, column=0, sticky="w")
+        ToolTip(auto_radio.frame, "Automatically pick the crossfade length that best matches\n"
+                                   "the head and tail of the selection, instead of a fixed value")
+
+        self.auto_value_label = tk.Label(parent, textvariable=self.auto_xfade_value_var,
+                                          bg=PANEL, fg=MUTED, font=("Segoe UI", 9))
+
+        self._xfade_radios = [manual_radio, auto_radio]
+        self._refresh_xfade_box()
+
+    def _refresh_xfade_box(self):
+        auto_on = self.auto_xfade_var.get()
+        for r in self._xfade_radios:
+            r.refresh()
+        self.xfade_entry.configure(state="disabled" if auto_on else "normal")
+        if auto_on:
+            self.auto_value_label.grid(row=1, column=1, sticky="w", padx=(10, 0))
+        else:
+            self.auto_value_label.grid_remove()
         self._update_auto_crossfade_preview()
 
     def _defocus_on_return(self, entry_widget):
@@ -2060,58 +2122,72 @@ class LoopCrossfadeGUI:
 
         ttk.Frame(outer, height=1, style="Panel.TFrame").pack(fill="x", pady=14)
 
-        # ---- crossfade options: Curve alone at top, then a 3-column row
-        # (Snap / Auto-detect / Manual), all inside one rounded, thin-
-        # bordered container. Auto-detect and Manual are mutually
-        # exclusive; whichever is inactive dims but stays clickable. ----
-        section_outer, section_inner = self._make_rounded_section(outer, PANEL, BORDER, radius=12, padding=12)
-        section_outer.pack(fill="x", pady=(4, 10))
+        # ---- three distinct task boxes: CURVE, XFADE, LOOP -- LOOP last,
+        # since it's likely the least-used of the three. Each is its own
+        # small rounded box with a header, rather than one shared
+        # container trying to hold four different decisions at once. ----
+        cols_row = ttk.Frame(outer); cols_row.pack(fill="x", pady=(4, 8))
 
-        curve_row = ttk.Frame(section_inner, style="Panel.TFrame")
-        curve_row.pack(fill="x", pady=(0, 10))
-        curve_wrapper = ttk.Frame(curve_row, style="Panel.TFrame")
-        curve_wrapper.pack(expand=True)
-        curve_combo = RoundedDropdown(curve_wrapper, self.curve_var, ["Equal power", "Linear"],
-                                       PANEL, FIELD_BG, FG, BORDER, ACCENT, height=28, radius=8, width=140)
-        curve_combo.pack()
-        ToolTip(curve_combo.frame, "Curve: shapes how the crossfade blends the two ends together.\n"
-                                    "Equal power: smoother, constant perceived loudness through the fade.\n"
-                                    "Linear: simpler ramp, can dip slightly in the middle.")
+        def _section_header(parent, title):
+            ttk.Label(parent, text=title, background=PANEL, foreground=FG,
+                      font=("Segoe UI", 10, "bold")).pack(anchor="w")
+            tk.Frame(parent, height=1, bg=BORDER).pack(fill="x", pady=(3, 6))
 
-        cols_row = ttk.Frame(section_inner, style="Panel.TFrame")
-        cols_row.pack(fill="x")
+        # CURVE
+        curve_outer, curve_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
+        curve_outer.pack(side="left", padx=(0, 8))
+        _section_header(curve_inner, "CURVE")
+        self._curve_radios = []
 
-        snap_col = tk.Frame(cols_row, bg=PANEL)
-        snap_col.pack(side="left", fill="both", expand=True, padx=(0, 6))
-        snap_cb = RoundedCheckbutton(snap_col, "Snap loop points to transients",
+        def _on_curve_click(value):
+            self.curve_var.set(value)
+            for r in self._curve_radios:
+                r.refresh()
+            self._on_param_changed()
+
+        curve_tip = ("Curve: shapes how the crossfade blends the two ends together.\n"
+                     "Equal power: smoother, constant perceived loudness through the fade.\n"
+                     "Linear: simpler ramp, can dip slightly in the middle.")
+        for value in ("Equal power", "Linear"):
+            radio = RoundedRadio(curve_inner, value, (lambda v=value: self.curve_var.get() == v),
+                                  (lambda v=value: _on_curve_click(v)), PANEL, FG, ACCENT, MUTED)
+            radio.pack(anchor="w", pady=1)
+            self._curve_radios.append(radio)
+            ToolTip(radio.frame, curve_tip)
+        self._finalize_rounded_section(curve_outer)
+
+        # XFADE
+        xfade_outer, xfade_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
+        xfade_outer.pack(side="left", padx=8)
+        _section_header(xfade_inner, "XFADE")
+        self._build_xfade_box(xfade_inner)
+        self._finalize_rounded_section(xfade_outer)
+
+        # LOOP (least-used, so it goes last)
+        loop_outer, loop_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
+        loop_outer.pack(side="left", padx=(8, 0))
+        _section_header(loop_inner, "LOOP")
+        snap_row = tk.Frame(loop_inner, bg=PANEL)
+        snap_row.pack(anchor="w")
+        snap_cb = RoundedCheckbutton(snap_row, "Snap to\ntransients",
                             self.snap_var, PANEL, FG, FIELD_BG, ACCENT, BORDER,
                             command=self._toggle_window_entry)
-        snap_cb.pack(anchor="w", pady=(4, 0))
+        snap_cb.pack(side="left")
         ToolTip(snap_cb.frame, "Trim the selection to the strongest nearby attack at each end,\n"
                                 "so the loop starts/ends on the beat instead of an arbitrary sample.\n"
-                                "Works alongside either Auto-detect or Manual crossfade.")
-        field_row = ttk.Frame(snap_col, style="Panel.TFrame")
-        field_row.pack(anchor="w", pady=(4, 4))
-        ttk.Label(field_row, text="Search window:", style="MutedOnPanel.TLabel").pack(side="left", padx=(24, 6))
-        self.window_entry = RoundedEntry(field_row, self.window_var, PANEL, FIELD_BG, FG, BORDER,
-                                          height=28, radius=8, width=70)
-        self.window_entry.pack(side="left")
-        self.window_entry.configure(state="disabled")
+                                "Works alongside either Auto or Manual crossfade.")
+        self.window_entry = RoundedEntry(snap_row, self.window_var, PANEL, FIELD_BG, FG, BORDER,
+                                          height=26, radius=7, width=60)
+        self.window_entry.pack(side="left", padx=(14, 0))
+        self.window_entry.configure(state="normal" if self.snap_var.get() else "disabled")
         self._defocus_on_return(self.window_entry.entry)
         ToolTip(self.window_entry.frame, "How far from each end to search for a transient (seconds) -- "
                                           "auto-populated, override by typing a new value")
-
-        self.auto_col_holder = tk.Frame(cols_row, bg=PANEL)
-        self.auto_col_holder.pack(side="left", fill="both", expand=True, padx=4)
-        self.manual_col_holder = tk.Frame(cols_row, bg=PANEL)
-        self.manual_col_holder.pack(side="left", fill="both", expand=True, padx=(4, 0))
-        self._rebuild_autodetect_manual_cards()
-
-        self._finalize_rounded_section(section_outer)
+        self._finalize_rounded_section(loop_outer)
 
         btn_process = ttk.Button(outer, text="Process & Save", style="Accent.TButton",
                    command=self.run_process, takefocus=0)
-        btn_process.pack(fill="x", pady=(10, 10))
+        btn_process.pack(fill="x", pady=(8, 8))
         ToolTip(btn_process, "Crossfade the current selection and save it to the 'Save as' path")
 
         ttk.Label(outer, textvariable=self.status_var, style="Muted.TLabel",
@@ -2129,9 +2205,6 @@ class LoopCrossfadeGUI:
         if notes:
             ttk.Label(outer, text=" / ".join(notes), style="Muted.TLabel",
                       foreground="#e2a33d", wraplength=700, justify="left").pack(anchor="w", pady=(8, 0))
-
-    def _toggle_xfade_entry(self):
-        self.xfade_entry.configure(state="disabled" if self.auto_xfade_var.get() else "normal")
 
     def _toggle_window_entry(self):
         self.window_entry.configure(state="normal" if self.snap_var.get() else "disabled")
