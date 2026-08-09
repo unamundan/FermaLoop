@@ -1068,7 +1068,7 @@ AUDITION_ON = "#2ecc82"       # distinct green while actively auditioning -- so 
 AUDITION_ON_HOVER = "#4fdb9c"  # read the same as the (blue) Loop toggle or default accent buttons
 BORDER = "#37393e"
 WAVEFORM_COLOR = "#5b8cff"
-ZERO_LINE_COLOR = "#4a4d54"  # darker grey, solid -- reads clearly against both the panel and the blue waveform
+ZERO_LINE_COLOR = "#9a9da3"  # matches MUTED -- verified 5.43:1 contrast against the panel (WCAG-checked, not eyeballed); a literally darker grey actually reads WORSE here, since it blends toward the panel background instead of standing out from it
 SELECTION_COLOR = "#3a4a6b"
 PLAYHEAD_COLOR = "#ff5c5c"
 HANDLE_COLOR = "#e6e6e8"
@@ -3635,7 +3635,17 @@ class LoopCrossfadeGUI:
                 self.root.geometry(f"{w}x{h}")
         else:
             self.root.geometry(f"{w}x{h}")
-        self.root.minsize(required_w, required_h)
+        # NOTE: minsize's width is deliberately much smaller than
+        # required_w. required_w reflects the window's natural size with
+        # the CURVE/XFADE/LOOP row laid out at its most generous width --
+        # using that as the minimum would mean the window could grow but
+        # never shrink back below its own starting size, since minsize()
+        # is a hard floor. The three boxes are responsive and redraw
+        # themselves to fit narrower space on their own (each still has
+        # its own internal floor so it won't visually break), so the
+        # window itself doesn't need to stay pinned at their widest case.
+        min_w = min(required_w, 480)
+        self.root.minsize(min_w, required_h)
 
     def _on_close(self):
         try:
