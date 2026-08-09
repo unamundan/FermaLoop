@@ -2,15 +2,38 @@
 """
 FermaLoop
 =========
-A standalone tool that replicates TwistedWave's "Loop Crossfade" effect:
-it blends the tail of an audio file into its head so the file loops back
-on itself with no click or pop at the seam -- plus:
+A tool for building seamless, glitch-free looping audio extensions --
+material that can function as an infinite or extended fermata: a held
+gesture with no fixed length, free to be released whenever a live
+performance actually calls for it, rather than at a fixed, predetermined
+timecode.
+
+The idea it's built around: live theatrical sound design is rarely as
+beat- or time-locked as a purely pre-recorded, playback-driven cue. A
+held chord, a drone, an ambient bed under a scene -- these often need to
+sustain for as long as the moment takes, not for a fixed duration decided
+in advance. FermaLoop takes a short audio selection and blends its tail
+into its head (crossfading away the seam) so it can loop indefinitely
+with no click or pop at the join, and/or runs it through PaulXStretch for
+extreme time-stretching, so a brief sound can become a long, evolving,
+decaying, or sustained bed. Combined, these two features are a way to
+build audio material that behaves less like a fixed backtrack and more
+like something a live operator can hold, extend, or release on cue.
+
+The resulting loops and stretches are meant to be exported and then
+programmed into cue-based playback software -- e.g. Figure53's QLab --
+where they can supplement the more rigid timing of pre-recorded
+backtracks with something more organically responsive to what's actually
+happening on stage: a way to introduce controllable, "conductable" timing
+into material that would otherwise be locked to the clock.
+
+Plus:
 
   * Multi-format I/O: WAV, AIFF, MP3, MP4/M4A, FLAC (decode/encode via ffmpeg)
   * A waveform view: drag to select a region, drag the edges to adjust it,
     crop to it, and preview before/after committing
   * Transport controls (Play/Pause, Stop, Rewind, Loop) with remappable
-    keyboard shortcuts (see the "Keyboard Shortcuts..." button in-app)
+    keyboard shortcuts (see the "Hints & Keyboard Shortcuts" button in-app)
   * Drag-and-drop file loading onto the window (falls back to Browse if
     tkinterdnd2 isn't installed -- see dependencies below)
   * Optional transient-snap: finds the strongest attack near the start and
@@ -18,6 +41,8 @@ on itself with no click or pop at the seam -- plus:
     or articulation instead of an arbitrary sample boundary
   * Crossfade length: manual by default, or an auto-detect option you can
     switch on (finds the length where the head/tail actually sound alike)
+  * PaulXStretch: extreme time-stretching for turning a short selection
+    into a long, evolving/decaying bed
   * A dark, flat, modern GUI
 
 Works on Windows, macOS, and Linux.
@@ -429,8 +454,8 @@ def _seam_cost(data, xfade_n, sr, length_penalty=0.06):
       - waveform correlation (do they line up in phase/shape?)
       - RMS energy match (is the blend a similar loudness throughout?)
     plus a small penalty for length, since a shorter crossfade preserves
-    more of the original transient content and TwistedWave-style loop
-    crossfades are typically tens to a few hundred ms, not seconds.
+    more of the original transient content and loop crossfades of this
+    kind are typically tens to a few hundred ms, not seconds.
     """
     n = data.shape[0]
     xfade_n = max(1, min(xfade_n, n // 2))
@@ -3693,10 +3718,35 @@ class LoopCrossfadeGUI:
         resize needed), while respecting a larger size -- and now also a
         saved position -- the user may have deliberately set last time."""
         self.root.update_idletasks()
-        required_w = self.root.winfo_reqwidth()
-        required_h = self.root.winfo_reqheight()
+
+        # Measure the STACKED-mode size first (CURVE/XFADE/LOOP stacked
+        # vertically) -- this becomes BOTH the default "narrowest
+        # natural" window size on first launch AND the true minimum
+        # width floor, computed together in one pass. A stacked box only
+        # ever needs to fit itself, not compete with two others for
+        # space side by side, so this is naturally much narrower than
+        # the side-by-side layout.
+        self._box_layout_mode = None
+        for box_outer, _ in self._box_pairs:
+            box_outer.pack_forget()
+        for box_outer, _ in self._box_pairs:
+            box_outer.pack(fill="x", pady=(0, 6))
+            self._set_box_height(box_outer, box_outer._rc["natural_h"])
+            # a bare tk.Canvas without an explicit -width doesn't compute
+            # winfo_reqwidth() from its content -- it just reports
+            # whatever its last actual rendered size happened to be.
+            # Explicitly setting it here forces an accurate reading of
+            # the box's real natural content width for this measurement.
+            box_outer._rc["canvas"].configure(width=box_outer._rc["natural_w"])
+        self._box_layout_mode = "stacked"
+        self.root.update()  # full update -- the responsive canvases' own
+                             # <Configure> bindings need a real event pass
+                             # to settle before reqwidth reflects this layout
+        stacked_w = self.root.winfo_reqwidth()
+        stacked_h = self.root.winfo_reqheight()
+
         saved = self.window_sizes.get("main")
-        w, h = resolve_window_size(required_w, required_h, saved)
+        w, h = resolve_window_size(stacked_w, stacked_h, saved)
         if saved and "x" in saved and "y" in saved:
             try:
                 x, y = int(saved["x"]), int(saved["y"])
@@ -3705,95 +3755,10 @@ class LoopCrossfadeGUI:
                 self.root.geometry(f"{w}x{h}")
         else:
             self.root.geometry(f"{w}x{h}")
-        # Measure the TRUE minimum width now that the CURVE/XFADE/LOOP row
-        # can stack vertically: temporarily force stacked mode, measure,
-        # then restore whatever mode actually fits the window being
-        # applied above. This is what makes the minimum genuinely small
-        # now, rather than needing to fit all three boxes side by side --
-        # a stacked box only competes with itself for width, not two
-        # others. (An earlier version just capped the minimum at an
-        # arbitrary 480px without checking the layout could support it,
-        # which let the window shrink into visibly clipped content --
-        # this instead measures a width the layout actually can honor.)
-        self._box_layout_mode = None
-        for box_outer, _ in self._box_pairs:
-            box_outer.pack_forget()
-        for box_outer, _ in self._box_pairs:
-            box_outer.pack(fill="x", pady=(0, 6))
-            self._set_box_height(box_outer, box_outer._rc["natural_h"])
-            # THE ACTUAL FIX: a bare tk.Canvas without an explicit -width
-            # doesn't compute winfo_reqwidth() from its content at all --
-            # it just reports whatever its last ACTUAL rendered size
-            # happened to be, which was ~1/3 of the wide side-by-side row
-            # for all three boxes (confirmed by logged data: all three
-            # canvases reported the exact same reqwidth as the unrelated
-            # waveform canvas). Just changing pack options doesn't make a
-            # canvas recompute that on its own. Explicitly setting the
-            # width here forces it to reflect the box's real natural
-            # content width for this measurement; cleared again below
-            # once the true minimum has been captured, so normal
-            # responsive resizing during actual use is unaffected.
-            box_outer._rc["canvas"].configure(width=box_outer._rc["natural_w"])
-        self._box_layout_mode = "stacked"
-        self.root.update()  # full update, not just idle tasks -- the
-                             # responsive canvases' own <Configure> bindings
-                             # may need a real event-processing pass to
-                             # settle before reqwidth reflects the new layout
-        min_w = self.root.winfo_reqwidth()
 
-        # DIAGNOSTIC: capture the measurement made WHILE actually in the
-        # forced-stacked state (not after restoring), since the previous
-        # round's log only showed the post-restore numbers and couldn't
-        # tell us whether stacking had any effect on reqwidth at all
-        try:
-            import datetime
-            lines = [f"[{datetime.datetime.now()}] STACKED-STATE measurement (before restore)",
-                     f"cols_row.winfo_reqwidth() while stacked: {self._cols_row.winfo_reqwidth()}",
-                     f"root.winfo_reqwidth() while stacked (this becomes min_w): {min_w}"]
-            for i, (box_outer, box_inner) in enumerate(self._box_pairs):
-                box_outer.update_idletasks()
-                lines.append(f"  box[{i}] outer.winfo_reqwidth()={box_outer.winfo_reqwidth()}, "
-                             f"canvas.winfo_reqwidth()={box_outer._rc['canvas'].winfo_reqwidth()}, "
-                             f"inner.winfo_reqwidth()={box_inner.winfo_reqwidth()}, "
-                             f"stored natural_w={box_outer._rc.get('natural_w')}")
-            log_text = "\n".join(lines) + "\n" + "=" * 60 + "\n"
-            for log_path in (os.path.join(os.path.expanduser("~"), "fermaloop_width_debug.txt"),
-                              os.path.join(os.getcwd(), "fermaloop_width_debug.txt")):
-                try:
-                    with open(log_path, "a") as f:
-                        f.write(log_text)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        self._box_layout_mode = None  # forces _update_box_layout to re-evaluate for real
+        self._box_layout_mode = None  # forces _update_box_layout to re-evaluate for the actual applied size
         self._update_box_layout()
-        self.root.minsize(min_w, required_h)
-
-        # DIAGNOSTIC: this exact area has now been guessed at wrong twice
-        # (an arbitrary 480px cap, then a stacking fix that apparently
-        # didn't fully resolve it either). Rather than guess a third time,
-        # log the actual reqwidth of every direct child of `outer` so we
-        # can see EXACTLY which row is keeping the minimum wide, instead
-        # of continuing to theorize about it.
-        try:
-            import datetime
-            lines = [f"[{datetime.datetime.now()}] window minsize width diagnostic",
-                     f"final min_w used for minsize(): {min_w}"]
-            for child in self._outer_frame.winfo_children():
-                child.update_idletasks()
-                lines.append(f"  {child} ({child.winfo_class()}): reqwidth={child.winfo_reqwidth()}")
-            log_text = "\n".join(lines) + "\n" + "=" * 60 + "\n"
-            for log_path in (os.path.join(os.path.expanduser("~"), "fermaloop_width_debug.txt"),
-                              os.path.join(os.getcwd(), "fermaloop_width_debug.txt")):
-                try:
-                    with open(log_path, "a") as f:
-                        f.write(log_text)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        self.root.minsize(stacked_w, stacked_h)
 
     def _on_close(self):
         try:
