@@ -2638,7 +2638,15 @@ class LoopCrossfadeGUI:
         self._side_by_side_min_width = sum(natural_widths) + 16  # +padx gaps between boxes
         self._stacked_min_width = max(natural_widths)
 
-        self._update_box_layout()
+        # NOT calling _update_box_layout() here: at this point in
+        # startup the window hasn't been sized/positioned yet (that's
+        # _apply_saved_or_natural_size's job, called shortly after), so
+        # whatever layout decision this would make now is immediately
+        # thrown away and redone from scratch once the window's real
+        # size is known -- a redundant pack+render pass on each box for
+        # a state nobody ever sees. Just bind for FUTURE resize events;
+        # the actual first layout pass happens once, correctly, in
+        # _apply_saved_or_natural_size.
         cols_row.bind("<Configure>", lambda e: self._update_box_layout())
 
         btn_process = ttk.Button(outer, text="Process & Save", style="Accent.TButton",
@@ -4111,7 +4119,37 @@ class LoopCrossfadeGUI:
         """Sizes the window to fit everything on first paint (no manual
         resize needed), while respecting a larger size -- and now also a
         saved position -- the user may have deliberately set last time."""
+        # TEMPORARY diagnostic: this exact area has now had one incomplete
+        # fix already (redraw suppression that missed a direct redraw()
+        # call bypassing it). Rather than guess at a second/third
+        # optimization blind, log where the actual wall-clock time goes
+        # through this whole method, so any REMAINING bottleneck (PIL
+        # render cost itself, icon loading, something in update()/
+        # update_idletasks() being inherently slower on this specific
+        # machine/macOS version, etc.) shows up concretely instead of
+        # being theorized about. Safe to remove once we have that data.
+        import time as _time
+        _t0 = _time.perf_counter()
+
+        def _mark(label):
+            try:
+                log_path = os.path.join(os.path.expanduser("~"), "fermaloop_startup_debug.txt")
+                with open(log_path, "a") as f:
+                    f.write(f"  {label}: {_time.perf_counter() - _t0:.4f}s elapsed\n")
+            except Exception:
+                pass
+
+        try:
+            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_startup_debug.txt")
+            with open(log_path, "a") as f:
+                import datetime
+                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                        f"_apply_saved_or_natural_size starting\n")
+        except Exception:
+            pass
+
         self.root.update_idletasks()
+        _mark("after initial update_idletasks()")
 
         # Measure the STACKED-mode size first (CURVE/XFADE/LOOP stacked
         # vertically) -- this becomes BOTH the default "narrowest
@@ -4139,16 +4177,27 @@ class LoopCrossfadeGUI:
             box_outer.pack_forget()
         for box_outer, _ in self._box_pairs:
             box_outer.pack(fill="x", pady=(0, 6))
-            self._set_box_height(box_outer, box_outer._rc["natural_h"])
+            # NOT using _set_box_height here: it calls redraw() directly,
+            # completely bypassing the <Configure> unbind above -- this
+            # was the actual reason the previous round of this fix only
+            # cut the render count partially instead of eliminating the
+            # redundant ones. This measurement pass only needs the
+            # dimensions actually configured for accurate
+            # winfo_reqwidth()/reqheight() readings, not a rendered
+            # result of an intermediate state nobody will ever see.
+            box_outer._rc["current_height"] = box_outer._rc["natural_h"]
+            box_outer._rc["canvas"].configure(height=box_outer._rc["natural_h"])
             # a bare tk.Canvas without an explicit -width doesn't compute
             # winfo_reqwidth() from its content -- it just reports
             # whatever its last actual rendered size happened to be.
             # Explicitly setting it here forces an accurate reading of
             # the box's real natural content width for this measurement.
             box_outer._rc["canvas"].configure(width=box_outer._rc["natural_w"])
+        _mark("after measurement-phase pack/configure loop (no renders should have fired)")
         self._box_layout_mode = "stacked"
         self.root.update()  # full update -- reqwidth needs a real event
                              # pass to settle and reflect this pack change
+        _mark("after self.root.update() (forced full event processing)")
         stacked_w = self.root.winfo_reqwidth()
         stacked_h = self.root.winfo_reqheight()
 
@@ -4162,6 +4211,7 @@ class LoopCrossfadeGUI:
                 self.root.geometry(f"{w}x{h}")
         else:
             self.root.geometry(f"{w}x{h}")
+        _mark("after applying final geometry()")
 
         # restore each canvas's real <Configure> binding NOW, right
         # before the one layout pass that actually needs to be seen
@@ -4171,6 +4221,7 @@ class LoopCrossfadeGUI:
         self._box_layout_mode = None  # forces _update_box_layout to re-evaluate for the actual applied size
         self._update_box_layout()
         self.root.minsize(stacked_w, stacked_h)
+        _mark("after final _update_box_layout() -- the one real, visible render pass")
 
     def _on_close(self):
         try:
