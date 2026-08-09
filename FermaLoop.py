@@ -1886,26 +1886,34 @@ class LoopCrossfadeGUI:
         value column lines up regardless of which row is active. The
         field-purpose labels ("Crossfade:") live in tooltips instead of
         on-screen text, per the "hover-over help instead of cluttering
-        the interface with text" direction."""
+        the interface with text" direction.
+
+        Builds into its OWN dedicated content frame (packed into `parent`)
+        rather than gridding directly into `parent` -- `parent` already
+        has the section header's label/divider managed by pack(), and Tk
+        forbids mixing pack and grid as siblings under the same parent."""
         tk = self.tk
-        manual_radio = RoundedRadio(parent, "Manual", lambda: not self.auto_xfade_var.get(),
+        content = tk.Frame(parent, bg=PANEL)
+        content.pack(fill="x")
+
+        manual_radio = RoundedRadio(content, "Manual", lambda: not self.auto_xfade_var.get(),
                                      self._on_manual_clicked, PANEL, FG, ACCENT, MUTED)
         manual_radio.frame.grid(row=0, column=0, sticky="w", pady=(0, 2))
         ToolTip(manual_radio.frame, "Crossfade duration in seconds")
 
-        self.xfade_entry = RoundedEntry(parent, self.xfade_var, PANEL, FIELD_BG, FG, BORDER,
+        self.xfade_entry = RoundedEntry(content, self.xfade_var, PANEL, FIELD_BG, FG, BORDER,
                                          height=26, radius=7, width=60)
         self.xfade_entry.frame.grid(row=0, column=1, sticky="w", padx=(10, 0), pady=(0, 2))
         self._defocus_on_return(self.xfade_entry.entry)
         ToolTip(self.xfade_entry.frame, "Crossfade duration in seconds")
 
-        auto_radio = RoundedRadio(parent, "Auto", lambda: self.auto_xfade_var.get(),
+        auto_radio = RoundedRadio(content, "Auto", lambda: self.auto_xfade_var.get(),
                                    self._on_auto_detect_clicked, PANEL, FG, ACCENT, MUTED)
         auto_radio.frame.grid(row=1, column=0, sticky="w")
         ToolTip(auto_radio.frame, "Automatically pick the crossfade length that best matches\n"
                                    "the head and tail of the selection, instead of a fixed value")
 
-        self.auto_value_label = tk.Label(parent, textvariable=self.auto_xfade_value_var,
+        self.auto_value_label = tk.Label(content, textvariable=self.auto_xfade_value_var,
                                           bg=PANEL, fg=MUTED, font=("Segoe UI", 9))
 
         self._xfade_radios = [manual_radio, auto_radio]
