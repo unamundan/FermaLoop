@@ -1068,6 +1068,7 @@ AUDITION_ON = "#2ecc82"       # distinct green while actively auditioning -- so 
 AUDITION_ON_HOVER = "#4fdb9c"  # read the same as the (blue) Loop toggle or default accent buttons
 BORDER = "#37393e"
 WAVEFORM_COLOR = "#5b8cff"
+ZERO_LINE_COLOR = "#4a4d54"  # darker grey, solid -- reads clearly against both the panel and the blue waveform
 SELECTION_COLOR = "#3a4a6b"
 PLAYHEAD_COLOR = "#ff5c5c"
 HANDLE_COLOR = "#e6e6e8"
@@ -1701,6 +1702,7 @@ class LoopCrossfadeGUI:
         self._live_update_after_id = None
         self._canvas_tooltip = None
         self._shortcuts_dialog = None
+        self._shortcuts_dialog_close_fn = None
 
         for var in (self.xfade_var, self.curve_var, self.auto_xfade_var,
                     self.snap_var, self.window_var):
@@ -2024,32 +2026,34 @@ class LoopCrossfadeGUI:
 
         # transport
         transport = ttk.Frame(outer); transport.pack(fill="x", pady=(4, 4))
+        transport_icons = ttk.Frame(transport)
+        transport_icons.pack(expand=True)  # centers the icon group horizontally
 
-        self.btn_play = self._make_icon_button(transport, "play", "Play", self.on_play_pause, size=self.ICON_SIZE)
+        self.btn_play = self._make_icon_button(transport_icons, "play", "Play", self.on_play_pause, size=self.ICON_SIZE)
         self.btn_play.pack(side="left", padx=(0, 4))
         self._play_tooltip = self._last_tooltip
 
-        self.btn_stop = self._make_icon_button(transport, "stop", "Stop", self.on_stop, size=self.ICON_SIZE)
+        self.btn_stop = self._make_icon_button(transport_icons, "stop", "Stop", self.on_stop, size=self.ICON_SIZE)
         self.btn_stop.pack(side="left", padx=4)
 
-        self.btn_repeat = self._make_icon_button(transport, "repeat",
+        self.btn_repeat = self._make_icon_button(transport_icons, "repeat",
                                                    "Repeat (loop the raw selection -- no crossfade, "
                                                    "you'll hear a click at the seam)",
                                                    self.on_repeat_toggle, size=self.ICON_SIZE)
         self.btn_repeat.pack(side="left", padx=4)
 
-        self.btn_loop = self._make_icon_button(transport, "loop",
+        self.btn_loop = self._make_icon_button(transport_icons, "loop",
                                                  "Audition (Play processed/crossfaded section, looped.)",
                                                  self.on_loop_preview, size=self.ICON_SIZE)
         self.btn_loop.pack(side="left", padx=(16, 4))
 
-        self.btn_crop = self._make_icon_button(transport, "crop",
+        self.btn_crop = self._make_icon_button(transport_icons, "crop",
                                                  "Crop to Selection. Crop is only needed once you want to "
                                                  "commit the working range.",
                                                  self.on_crop, size=self.ICON_SIZE)
         self.btn_crop.pack(side="left", padx=4)
 
-        btn_stretch = self._make_icon_button(transport, "stretch",
+        btn_stretch = self._make_icon_button(transport_icons, "stretch",
                                               "PaulXStretch: extreme time-stretch the current selection",
                                               self.open_stretch_dialog, size=self.ICON_SIZE)
         btn_stretch.pack(side="left", padx=4)
@@ -2464,7 +2468,7 @@ class LoopCrossfadeGUI:
                 self.canvas.create_line(x, y1, x, y2, fill=WAVEFORM_COLOR)
 
         # subtle zero-crossing reference line (amplitude 0 = vertical center)
-        self.canvas.create_line(0, h / 2, w, h / 2, fill=BORDER, width=1, dash=(2, 3))
+        self.canvas.create_line(0, h / 2, w, h / 2, fill=ZERO_LINE_COLOR, width=1)
 
         sx = self._sample_to_x(self.sel_start, w)
         ex = self._sample_to_x(self.sel_end, w)
@@ -3329,14 +3333,18 @@ class LoopCrossfadeGUI:
         return "-".join(parts)
 
     def open_shortcuts_dialog(self):
-        # singleton: repeated clicks on the info icon were opening a brand
-        # new window every time with no check for one already being open
+        # toggle: clicking the info icon again while the dialog is already
+        # open closes it (same as clicking its own close button), rather
+        # than just re-focusing an existing window every time
         if getattr(self, "_shortcuts_dialog", None) is not None:
             try:
                 if self._shortcuts_dialog.winfo_exists():
-                    self._shortcuts_dialog.deiconify()
-                    self._shortcuts_dialog.lift()
-                    self._shortcuts_dialog.focus_force()
+                    close_fn = getattr(self, "_shortcuts_dialog_close_fn", None)
+                    if close_fn is not None:
+                        close_fn()
+                    else:
+                        self._shortcuts_dialog.destroy()
+                        self._shortcuts_dialog = None
                     return
             except Exception:
                 pass
@@ -3427,8 +3435,10 @@ class LoopCrossfadeGUI:
             except Exception:
                 pass
             self._shortcuts_dialog = None
+            self._shortcuts_dialog_close_fn = None
             dlg.destroy()
 
+        self._shortcuts_dialog_close_fn = on_close
         dlg.protocol("WM_DELETE_WINDOW", on_close)
 
     # ---------------- process & save ----------------
