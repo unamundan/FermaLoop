@@ -2650,30 +2650,35 @@ class LoopCrossfadeGUI:
         return candidates
 
     def _nearest_zero_crossing_directional(self, data, sr, sample, max_window_samples,
-                                            preferred_direction=None, max_ratio=2.5):
-        """Amplitude-closeness (via _nearest_zero_crossing) is always the
-        non-negotiable floor -- this only ever adds a PREFERENCE on top of
-        it. When preferred_direction is given, prefers the nearest TRUE
-        zero-crossing of that direction, unless it's more than max_ratio
-        times farther away than the plain nearest-amplitude point -- so
-        matching direction can only ever be a bonus on an already-good
-        candidate, never a trade against actual click-safety."""
+                                            preferred_direction=None, hard_cap_seconds=2.0):
+        """When preferred_direction is given, ALWAYS returns a true zero-
+        crossing of that direction if one can be found at all -- widening
+        the search progressively rather than settling for a nearby
+        mismatched-direction point. This is deliberately strict: matching-
+        direction crossings occur roughly once per full waveform cycle
+        (vs. once per half-cycle for either direction), so for any real,
+        actively-oscillating audio a match is virtually always close by --
+        an earlier version gave up and fell back to a mismatched direction
+        whenever the match seemed "too far," which in practice meant
+        selections could end up with mismatched slopes far more often
+        than intended. Only falls back to the plain amplitude-nearest
+        point (regardless of direction) for genuinely degenerate audio --
+        silence or DC -- where no real crossing exists even within a
+        generous widened search."""
         baseline = self._nearest_zero_crossing(data, sr, sample, max_window_samples=max_window_samples)
-        if preferred_direction is None or data is None:
+        if preferred_direction is None or data is None or len(data) == 0:
             return baseline
+        hard_cap = min(len(data), max(1, int(sr * hard_cap_seconds)))
         window = max(1, int(max_window_samples))
-        matching = [c for c in self._zero_crossing_candidates(data, sr, sample, window)
-                    if c[1] == preferred_direction]
-        if not matching:
-            return baseline
-        best_idx, _ = min(matching, key=lambda c: abs(c[0] - sample))
-        baseline_dist = abs(baseline - sample)
-        best_dist = abs(best_idx - sample)
-        if baseline_dist == 0:
-            return best_idx if best_dist <= 1 else baseline
-        if best_dist <= baseline_dist * max_ratio:
-            return best_idx
-        return baseline
+        while True:
+            matching = [c for c in self._zero_crossing_candidates(data, sr, sample, window)
+                        if c[1] == preferred_direction]
+            if matching:
+                best_idx, _ = min(matching, key=lambda c: abs(c[0] - sample))
+                return best_idx
+            if window >= hard_cap:
+                return baseline  # genuinely degenerate case -- accept the mismatch
+            window = min(window * 2, hard_cap)
 
     def _nearest_zero_crossing(self, data, sr, sample, window_ms=15, max_window_samples=None):
         """Finds the sample index within a small window around `sample`
