@@ -1170,11 +1170,12 @@ def _hex_to_rgb(hex_color):
 
 
 def format_time(seconds):
-    """MM:SS.mmm"""
+    """HH:MM:SS.mmm"""
     seconds = max(0.0, seconds)
-    m = int(seconds // 60)
-    s = seconds - m * 60
-    return f"{m:02d}:{s:06.3f}"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:06.3f}"
 
 
 def pick_tick_interval(span_sec, canvas_width_px=None, min_label_spacing_px=70, target_ticks=8):
@@ -1997,7 +1998,7 @@ class LoopCrossfadeGUI:
         self.window_var = tk.StringVar(value="0.25")
         self.repeat_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="")
-        self.time_var = tk.StringVar(value="00:00.000")
+        self.time_var = tk.StringVar(value="00:00:00.000")
         self.selection_duration_var = tk.StringVar(value="Selection: --")
         self._click_flag = None       # (x_pixel, time_str) or None
         self._click_flag_after_id = None
@@ -2185,7 +2186,7 @@ class LoopCrossfadeGUI:
         self._refresh_xfade_box()
         self._on_param_changed()
 
-    def _build_xfade_box(self, parent):
+    def _build_xfade_box(self, parent, header_label=None):
         """Manual above Auto (Manual is the more commonly used option, and
         defaults to selected). Both share one grid so the field/reference-
         value column lines up regardless of which row is active. The
@@ -2218,7 +2219,10 @@ class LoopCrossfadeGUI:
         xfade_section_bullets = ["Manual: crossfade duration in seconds",
                                   "Auto: automatically picks the crossfade length that best "
                                   "matches the head and tail of the selection, instead of a fixed value"]
-        for widget in (manual_radio.frame, self.xfade_entry.frame, auto_radio.frame):
+        widgets_for_tip = [manual_radio.frame, self.xfade_entry.frame, auto_radio.frame]
+        if header_label is not None:
+            widgets_for_tip.append(header_label)
+        for widget in widgets_for_tip:
             tip = ToolTip(widget)
             tip.set_section("XFADE OVERLAP", xfade_section_desc, xfade_section_bullets)
 
@@ -2470,9 +2474,11 @@ class LoopCrossfadeGUI:
         cols_row = ttk.Frame(outer); cols_row.pack(fill="x", pady=(4, 8))
 
         def _section_header(parent, title):
-            ttk.Label(parent, text=title, background=PANEL, foreground=FG,
-                      font=("Segoe UI", 10, "bold")).pack(anchor="w")
+            label = ttk.Label(parent, text=title, background=PANEL, foreground=FG,
+                               font=("Segoe UI", 10, "bold"))
+            label.pack(anchor="w")
             tk.Frame(parent, height=1, bg=BORDER).pack(fill="x", pady=(3, 6))
+            return label
 
         # Build all three boxes' CONTENT first (without packing/finalizing
         # any of them yet) so their natural heights can be measured
@@ -2480,7 +2486,7 @@ class LoopCrossfadeGUI:
 
         # CURVE
         curve_outer, curve_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
-        _section_header(curve_inner, "XFADE CURVE")
+        curve_header = _section_header(curve_inner, "XFADE CURVE")
         self._curve_radios = []
 
         def _on_curve_click(value):
@@ -2499,15 +2505,17 @@ class LoopCrossfadeGUI:
             self._curve_radios.append(radio)
             tip = ToolTip(radio.frame)
             tip.set_section("XFADE CURVE", curve_section_tip[0], curve_section_tip[1])
+        header_tip = ToolTip(curve_header)
+        header_tip.set_section("XFADE CURVE", curve_section_tip[0], curve_section_tip[1])
 
         # XFADE
         xfade_outer, xfade_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
-        _section_header(xfade_inner, "XFADE OVERLAP")
-        self._build_xfade_box(xfade_inner)
+        xfade_header = _section_header(xfade_inner, "XFADE OVERLAP")
+        self._build_xfade_box(xfade_inner, header_label=xfade_header)
 
         # LOOP (least-used, so it goes last)
         loop_outer, loop_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
-        _section_header(loop_inner, "LOOP ALIGNMENT")
+        loop_header = _section_header(loop_inner, "LOOP ALIGNMENT")
         snap_row = tk.Frame(loop_inner, bg=PANEL)
         snap_row.pack(anchor="w")
         snap_cb = RoundedCheckbutton(snap_row, "Snap to\ntransients",
@@ -2526,7 +2534,7 @@ class LoopCrossfadeGUI:
                                  "works alongside either Auto or Manual crossfade",
                                  "Search range: how far from each end to search for a transient, in "
                                  "seconds -- auto-populated, override by typing a new value"]
-        for widget in (snap_cb.frame, self.window_entry.frame):
+        for widget in (snap_cb.frame, self.window_entry.frame, loop_header):
             tip = ToolTip(widget)
             tip.set_section("LOOP ALIGNMENT", loop_section_desc, loop_section_bullets)
 
@@ -2898,7 +2906,7 @@ class LoopCrossfadeGUI:
         self.redo_stack.clear()
         self.in_path_var.set("")
         self.out_path_var.set("")
-        self.time_var.set("00:00.000")
+        self.time_var.set("00:00:00.000")
         self._update_selection_duration_label()
         self._update_auto_crossfade_preview()
         self._redraw()
@@ -3691,7 +3699,7 @@ class LoopCrossfadeGUI:
                 self.preview_mode = False
                 self._refresh_loop_and_repeat_icons()
                 self._set_play_pause_icon(False)
-                self.time_var.set("00:00.000")
+                self.time_var.set("00:00:00.000")
                 self.player.load(self.data, self.sr)
                 self._redraw()
                 self._update_selection_duration_label()
