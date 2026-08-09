@@ -1152,6 +1152,10 @@ ZERO_LINE_COLOR = "#9a9da3"  # matches MUTED -- verified 5.43:1 contrast against
 
 TOOLTIP_BG = "#111214"       # near-black, existing tooltip background
 TOOLTIP_BORDER = "#2a2c30"
+TOOLTIP_WRAPLENGTH = 260  # applies to every tooltip's text, so a long
+                          # description always wraps to a readable box
+                          # width instead of running off-screen as one
+                          # unbounded line
 KEYCAP_BG = "#0a0b0c"        # darker than the tooltip itself -- a recessed "simulated key" look
 KEYCAP_BORDER = "#2a2c30"
 KEYCAP_FG = "#c8cad0"        # light enough to read clearly against the darker keycap
@@ -1786,8 +1790,10 @@ class ToolTip:
         if self.tip is not None or (not self.text and not self.rich):
             return
         try:
-            x = self.widget.winfo_rootx() + 12
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+            anchor_x = self.widget.winfo_rootx() + 12
+            anchor_y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+            screen_w = self.widget.winfo_screenwidth()
+            screen_h = self.widget.winfo_screenheight()
         except Exception:
             return
         tk = self.tk
@@ -1797,7 +1803,7 @@ class ToolTip:
             self.tip.wm_attributes("-topmost", True)
         except Exception:
             pass
-        self.tip.wm_geometry(f"+{x}+{y}")
+        self.tip.wm_geometry(f"+{anchor_x}+{anchor_y}")
 
         if self.rich:
             name, key, description = self.rich
@@ -1812,13 +1818,33 @@ class ToolTip:
                 self._render_keycap(header, key).pack(side="left", padx=(8, 0))
             tk.Frame(frame, height=1, bg=TOOLTIP_BORDER).pack(fill="x", padx=9)
             tk.Label(frame, text=description, bg=TOOLTIP_BG, fg=MUTED,
-                     font=("Segoe UI", 9), wraplength=260, justify="left").pack(
+                     font=("Segoe UI", 9), wraplength=TOOLTIP_WRAPLENGTH, justify="left").pack(
                      anchor="w", fill="x", padx=9, pady=(5, 7))
         else:
             label = tk.Label(self.tip, text=self.text, bg=TOOLTIP_BG, fg=FG,
                               font=("Segoe UI", 9), padx=8, pady=4,
-                              relief="solid", borderwidth=1)
+                              relief="solid", borderwidth=1,
+                              wraplength=TOOLTIP_WRAPLENGTH, justify="left")
             label.pack()
+
+        # Reposition to stay fully on-screen -- this couldn't be done
+        # up-front, since the tooltip's actual rendered size isn't known
+        # until its content is built. Without this, a tooltip could run
+        # off the right or bottom edge of the screen depending on where
+        # the main window happens to be sitting when you hover something.
+        try:
+            self.tip.update_idletasks()
+            tip_w, tip_h = self.tip.winfo_width(), self.tip.winfo_height()
+            margin = 8
+            final_x, final_y = anchor_x, anchor_y
+            if final_x + tip_w > screen_w - margin:
+                final_x = max(margin, self.widget.winfo_rootx() - tip_w - 4)  # flip to the left of the widget instead
+            if final_y + tip_h > screen_h - margin:
+                final_y = max(margin, self.widget.winfo_rooty() - tip_h - 6)  # flip above the widget instead
+            if (final_x, final_y) != (anchor_x, anchor_y):
+                self.tip.wm_geometry(f"+{final_x}+{final_y}")
+        except Exception:
+            pass
 
     def _render_keycap(self, parent, key_text):
         """A small rounded, recessed 'keycap' badge for a shortcut --
@@ -2391,7 +2417,7 @@ class LoopCrossfadeGUI:
 
         # CURVE
         curve_outer, curve_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
-        _section_header(curve_inner, "FADE CURVE")
+        _section_header(curve_inner, "XFADE CURVE")
         self._curve_radios = []
 
         def _on_curve_click(value):
@@ -2412,12 +2438,12 @@ class LoopCrossfadeGUI:
 
         # XFADE
         xfade_outer, xfade_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
-        _section_header(xfade_inner, "XFADE")
+        _section_header(xfade_inner, "XFADE OVERLAP")
         self._build_xfade_box(xfade_inner)
 
         # LOOP (least-used, so it goes last)
         loop_outer, loop_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
-        _section_header(loop_inner, "LOOP")
+        _section_header(loop_inner, "LOOP ALIGNMENT")
         snap_row = tk.Frame(loop_inner, bg=PANEL)
         snap_row.pack(anchor="w")
         snap_cb = RoundedCheckbutton(snap_row, "Snap to\ntransients",
