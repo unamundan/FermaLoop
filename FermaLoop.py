@@ -1870,6 +1870,36 @@ class LoopCrossfadeGUI:
             canvas.create_image(0, 0, anchor="nw", image=photo)
         canvas.create_window(padding, padding, anchor="nw", window=inner)
 
+    def _finalize_responsive_section(self, outer, forced_height=None):
+        """Like _finalize_rounded_section, but the box stretches
+        horizontally to fill whatever space its parent gives it (matching
+        how Input/Save-as and Process & Save already behave) instead of
+        staying a fixed size -- redraws the rounded background on every
+        resize. `forced_height` lets a row of these share one common
+        height instead of each sizing independently to its own content."""
+        rc = outer._rc
+        canvas, inner, padding = rc["canvas"], rc["inner"], rc["padding"]
+        inner.update_idletasks()
+        natural_w = inner.winfo_reqwidth() + padding * 2
+        natural_h = inner.winfo_reqheight() + padding * 2
+        h = forced_height if forced_height is not None else natural_h
+        canvas.configure(height=h)
+        canvas.create_window(padding, padding, anchor="nw", window=inner, tags="content")
+
+        def redraw(event=None):
+            w = max(natural_w, canvas.winfo_width())
+            if PIL_AVAILABLE:
+                img = render_rounded_box_image(w, h, rc["radius"], rc["fill"], rc["border"])
+                photo = ImageTk.PhotoImage(img)
+                canvas._bg_photo = photo  # keep a reference or Tk garbage-collects it
+                canvas.delete("bg")
+                canvas.create_image(0, 0, anchor="nw", image=photo, tags="bg")
+                canvas.tag_lower("bg")  # keep it behind the actual content
+
+        canvas.bind("<Configure>", redraw)
+        redraw()
+        return natural_w, natural_h
+
     def _on_auto_detect_clicked(self):
         self.auto_xfade_var.set(True)
         self._refresh_xfade_box()
@@ -2141,9 +2171,12 @@ class LoopCrossfadeGUI:
                       font=("Segoe UI", 10, "bold")).pack(anchor="w")
             tk.Frame(parent, height=1, bg=BORDER).pack(fill="x", pady=(3, 6))
 
+        # Build all three boxes' CONTENT first (without packing/finalizing
+        # any of them yet) so their natural heights can be measured
+        # together below, and all three finalized with ONE shared height.
+
         # CURVE
         curve_outer, curve_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
-        curve_outer.pack(side="left", padx=(0, 8))
         _section_header(curve_inner, "CURVE")
         self._curve_radios = []
 
@@ -2162,18 +2195,14 @@ class LoopCrossfadeGUI:
             radio.pack(anchor="w", pady=1)
             self._curve_radios.append(radio)
             ToolTip(radio.frame, curve_tip)
-        self._finalize_rounded_section(curve_outer)
 
         # XFADE
         xfade_outer, xfade_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
-        xfade_outer.pack(side="left", padx=8)
         _section_header(xfade_inner, "XFADE")
         self._build_xfade_box(xfade_inner)
-        self._finalize_rounded_section(xfade_outer)
 
         # LOOP (least-used, so it goes last)
         loop_outer, loop_inner = self._make_rounded_section(cols_row, PANEL, BORDER, radius=12, padding=8)
-        loop_outer.pack(side="left", padx=(8, 0))
         _section_header(loop_inner, "LOOP")
         snap_row = tk.Frame(loop_inner, bg=PANEL)
         snap_row.pack(anchor="w")
@@ -2191,7 +2220,23 @@ class LoopCrossfadeGUI:
         self._defocus_on_return(self.window_entry.entry)
         ToolTip(self.window_entry.frame, "How far from each end to search for a transient (seconds) -- "
                                           "auto-populated, override by typing a new value")
-        self._finalize_rounded_section(loop_outer)
+
+        # All three now finalize with ONE SHARED height (the tallest of
+        # the three's own natural content), and each is packed to equally
+        # share -- and stretch with -- the row's width as the window is
+        # resized, matching how Input/Save-as and Process & Save already
+        # behave, rather than staying a fixed size.
+        box_pairs = [(curve_outer, curve_inner), (xfade_outer, xfade_inner), (loop_outer, loop_inner)]
+        natural_heights = []
+        for box_outer, box_inner in box_pairs:
+            box_inner.update_idletasks()
+            natural_heights.append(box_inner.winfo_reqheight() + box_outer._rc["padding"] * 2)
+        shared_height = max(natural_heights)
+
+        paddings = [(0, 8), (8, 8), (8, 0)]
+        for (box_outer, box_inner), pad in zip(box_pairs, paddings):
+            box_outer.pack(side="left", fill="both", expand=True, padx=pad)
+            self._finalize_responsive_section(box_outer, forced_height=shared_height)
 
         btn_process = ttk.Button(outer, text="Process & Save", style="Accent.TButton",
                    command=self.run_process, takefocus=0)
