@@ -3239,7 +3239,7 @@ class LoopCrossfadeGUI:
 
         # timeline ruler (shared coordinate space with the waveform below)
         self.timeline_canvas = tk.Canvas(outer, height=22, bg=BG, highlightthickness=0)
-        self.timeline_canvas.pack(fill="x", pady=(12, 0))
+        self.timeline_canvas.pack(fill="x", pady=(6, 0))
         self.timeline_canvas.bind("<Configure>", lambda e: self._redraw())
 
         # waveform canvas
@@ -3258,7 +3258,7 @@ class LoopCrossfadeGUI:
         self._draw_placeholder()
 
         # timer + selection duration readouts
-        info_row = ttk.Frame(outer); info_row.pack(fill="x", pady=(4, 6))
+        info_row = ttk.Frame(outer); info_row.pack(fill="x", pady=(2, 6))
         ttk.Label(info_row, textvariable=self.time_var, style="Muted.TLabel",
                   font=("Segoe UI", 22, "bold")).pack(side="left")
         ttk.Label(info_row, textvariable=self.selection_duration_var, style="Muted.TLabel").pack(side="right")
@@ -3298,13 +3298,17 @@ class LoopCrossfadeGUI:
         btn_stretch.pack(side="left", padx=4)
         self._stretch_tooltip = self._last_tooltip
 
-        ttk.Frame(outer, height=1, style="Panel.TFrame").pack(fill="x", pady=14)
-
+        # Divider removed -- the ~37px combined gap it created (14px pad
+        # + the line + 14px pad + cols_row's own 4px top pad) read as too
+        # much dead space between the transport controls and the boxes
+        # below. A single, more modest gap replaces it -- present, but
+        # tightened, not eliminated outright.
+        #
         # ---- three distinct task boxes: CURVE, XFADE, LOOP -- LOOP last,
         # since it's likely the least-used of the three. Each is its own
         # small rounded box with a header, rather than one shared
         # container trying to hold four different decisions at once. ----
-        cols_row = ttk.Frame(outer); cols_row.pack(fill="x", pady=(4, 8))
+        cols_row = ttk.Frame(outer); cols_row.pack(fill="x", pady=(14, 8))
 
         def _section_header(parent, title):
             label = ttk.Label(parent, text=title, background=PANEL, foreground=FG,
@@ -4977,7 +4981,33 @@ class LoopCrossfadeGUI:
                              # pass to settle and reflect this pack change
         _log_startup("_apply_saved_or_natural_size: after self.root.update() (forced full event processing)")
         stacked_w = self.root.winfo_reqwidth()
+
+        # Temporarily substitute a realistic WORST-CASE status message
+        # before measuring height, then restore the real one right after.
+        # The status label's text changes constantly at runtime (load/
+        # crop/undo/process messages), and the longest of these -- the
+        # "Process & Save" success message -- can wrap to 3-4 lines via
+        # explicit newlines (it includes the full output file path,
+        # which can be long depending on the user's folder structure).
+        # Sizing the window from whatever short text happens to be
+        # showing at startup (typically empty, or the initial "Unloaded"
+        # hint) meant the window was never actually tall enough for that
+        # message once it appeared -- it would get clipped at the bottom
+        # edge, with no indication anything was cut off unless you
+        # already knew to manually resize the window taller and look.
+        _example_path = "/Users/example/Music/Theatrical Show 2026/Act 2 Scene 3 Ambient Drone LOOP.flac"
+        _worst_case_status = (
+            "Done in 12.34s -- 45.67s loop saved to:\n"
+            f"{_example_path}\n"
+            "Crossfade used: 42 ms\n"
+            "Trimmed to transients: 15 ms from start, 23 ms from end"
+        )
+        _real_status = self.status_var.get()
+        self.status_var.set(_worst_case_status)
+        self.root.update_idletasks()
         stacked_h = self.root.winfo_reqheight()
+        self.status_var.set(_real_status)
+        self.root.update_idletasks()
 
         saved = self.window_sizes.get("main")
         w, h = resolve_window_size(stacked_w, stacked_h, saved)
