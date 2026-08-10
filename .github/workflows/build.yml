@@ -73,16 +73,29 @@ jobs:
 
       - name: Build self-contained executable
         run: >
-          pyinstaller --onefile --windowed --name FermaLoop
+          pyinstaller --onedir --windowed --name FermaLoop
           --add-binary "ffmpeg.exe;."
           --collect-all sounddevice --collect-all tkinterdnd2
           FermaLoop.py
+        # --onedir, not --onefile: a --onefile build re-extracts its
+        # entire bundled Python runtime + dependencies to a fresh temp
+        # directory on EVERY launch, before the app's own code even
+        # starts running -- this was confirmed as the actual source of
+        # a multi-second startup delay (measured: the app's own code
+        # runs in well under half a second once it actually starts;
+        # the delay was happening entirely before that, in PyInstaller's
+        # own bootstrap). --onedir ships everything already unpacked, so
+        # there's nothing left to extract at launch.
+
+      - name: Zip the app folder
+        shell: pwsh
+        run: Compress-Archive -Path dist\FermaLoop -DestinationPath dist\FermaLoop-Windows.zip
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
           name: FermaLoop-Windows
-          path: dist/FermaLoop.exe
+          path: dist/FermaLoop-Windows.zip
 
   build-macos:
     runs-on: macos-latest
@@ -105,10 +118,17 @@ jobs:
 
       - name: Build self-contained .app
         run: >
-          pyinstaller --onefile --windowed --name FermaLoop
+          pyinstaller --onedir --windowed --name FermaLoop
           --add-binary "ffmpeg:."
           --collect-all sounddevice --collect-all tkinterdnd2
           FermaLoop.py
+        # --onedir, not --onefile: see the matching note in the Windows
+        # job above -- this is what was actually behind the multi-second
+        # startup delay, confirmed by direct timing (the app's own code
+        # completes in well under half a second once running; the delay
+        # was entirely PyInstaller's own per-launch extraction, which
+        # this eliminates by shipping everything already unpacked inside
+        # the .app bundle).
 
       - name: Zip the .app bundle
         run: cd dist && zip -r FermaLoop-Mac.zip FermaLoop.app
