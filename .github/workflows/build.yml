@@ -71,9 +71,13 @@ jobs:
           }
           Copy-Item $ffmpegExe.FullName -Destination .\ffmpeg.exe
 
+      - name: Generate Windows version-info file
+        run: python generate_version_info.py FermaLoop.py version_info.txt
+
       - name: Build self-contained executable
         run: >
           pyinstaller --onedir --windowed --name FermaLoop
+          --version-file version_info.txt
           --add-binary "ffmpeg.exe;."
           --collect-all sounddevice --collect-all tkinterdnd2
           FermaLoop.py
@@ -129,6 +133,13 @@ jobs:
         # was entirely PyInstaller's own per-launch extraction, which
         # this eliminates by shipping everything already unpacked inside
         # the .app bundle).
+
+      - name: Add version/author metadata to Info.plist
+        run: python update_macos_plist.py FermaLoop.py dist/FermaLoop.app
+        # PyInstaller's own generated Info.plist doesn't include version,
+        # author, or copyright info by default -- this is why "Get Info"
+        # on the built .app previously showed nothing meaningful for any
+        # of those fields.
 
       - name: Zip the .app bundle
         run: cd dist && zip -r FermaLoop-Mac.zip FermaLoop.app
