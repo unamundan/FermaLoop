@@ -1737,6 +1737,16 @@ class RoundedDropdown:
         y = self.canvas.winfo_rooty() + self.canvas.winfo_height()
         self.popup = tk.Toplevel(self.canvas)
         self.popup.wm_overrideredirect(True)
+        # -topmost wasn't previously set here (unlike ToolTip, which does
+        # set it) -- without it, an overrideredirect popup can end up
+        # visually present but not properly registered as the frontmost,
+        # click-receiving surface with macOS's window server, which is
+        # consistent with clicks on its rows being unreliable rather than
+        # the popup simply not appearing at all.
+        try:
+            self.popup.wm_attributes("-topmost", True)
+        except Exception:
+            pass
         row_h = 30
         self.popup.wm_geometry(f"{self.fixed_width}x{len(self.values) * row_h}+{x}+{y}")
         frame = tk.Frame(self.popup, bg=self.field_bg, highlightthickness=1, highlightbackground=self.border)
@@ -1756,7 +1766,26 @@ class RoundedDropdown:
         # event, not an actual click elsewhere). Closing now only happens
         # via selecting a row or clicking the dropdown button again to
         # toggle it shut, both of which are reliable on every platform.
-        self.popup.focus_set()
+        #
+        # focus_force() (not focus_set()) plus lift(), and both deferred
+        # slightly rather than called synchronously right after creating
+        # the window: macOS's window server can take a beat to fully
+        # register a freshly-created overrideredirect Toplevel as an
+        # actual click-receiving surface, and asking for focus/raising it
+        # before that settles is a plausible explanation for "the first
+        # click or two doesn't register, but eventually it does" -- the
+        # reported symptom here. This still runs well within what reads
+        # as instantaneous to a person clicking a dropdown.
+        self.popup.lift()
+        self.popup.after(30, self._settle_popup_focus)
+
+    def _settle_popup_focus(self):
+        if self.popup is not None:
+            try:
+                self.popup.lift()
+                self.popup.focus_force()
+            except Exception:
+                pass
 
     def _select(self, val):
         self.variable.set(val)
@@ -1969,9 +1998,27 @@ class ToolTip:
                 bullets_frame = tk.Frame(frame, bg=TOOLTIP_BG)
                 bullets_frame.pack(fill="x", padx=9, pady=(6, 7))
                 for bullet in bullets:
-                    tk.Label(bullets_frame, text=f"\u2022 {bullet}", bg=TOOLTIP_BG, fg=MUTED,
-                             font=("Segoe UI", 9), wraplength=TOOLTIP_WRAPLENGTH - 10,
-                             justify="left").pack(anchor="w", fill="x", pady=1)
+                    # True hanging indent: the bullet marker and the
+                    # description text are TWO separate labels side by
+                    # side, not one label with "\u2022 {bullet}" as a
+                    # single string. A single label's wrapped lines
+                    # always return to ITS OWN left edge (i.e. back
+                    # under the bullet marker itself), which is exactly
+                    # the inconsistent-looking indentation reported --
+                    # wrapped continuation lines were landing under the
+                    # bullet character instead of under the text that
+                    # follows it. With the description in its own label
+                    # positioned to the right of a fixed-width marker
+                    # column, its wrapped lines naturally align with
+                    # their own first line instead.
+                    row = tk.Frame(bullets_frame, bg=TOOLTIP_BG)
+                    row.pack(fill="x", anchor="w", pady=2)
+                    tk.Label(row, text="\u2022", bg=TOOLTIP_BG, fg=MUTED,
+                             font=("Segoe UI", 9), width=2, anchor="nw").pack(side="left")
+                    tk.Label(row, text=bullet, bg=TOOLTIP_BG, fg=MUTED,
+                             font=("Segoe UI", 9), wraplength=TOOLTIP_WRAPLENGTH - 32,
+                             justify="left", anchor="w").pack(side="left", fill="x")
+
         else:
             label = tk.Label(self.tip, text=self.text, bg=TOOLTIP_BG, fg=FG,
                               font=("Segoe UI", 9), padx=8, pady=4,
