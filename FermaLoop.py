@@ -45,7 +45,10 @@ Plus:
     into a long, evolving/decaying bed
   * A dark, flat, modern GUI
 
-Works on Windows, macOS, and Linux.
+Runs from source on Windows, macOS, and Linux; packaged builds are
+currently produced for Windows and macOS only (see build.yml).
+
+GitHub: https://github.com/unamundan/FermaLoop
 
 --------------------------------------------------------------------------
 DEPENDENCIES
@@ -95,6 +98,16 @@ The result in dist/ is a standalone double-clickable app (still needs
 ffmpeg on the target machine for non-WAV formats, unless bundled -- see
 the project's build.yml for a version that embeds ffmpeg too).
 """
+
+# Single source of truth for the app's version/author metadata -- read
+# directly by build.yml (via a small extraction step) to populate the
+# Windows .exe version resource and the macOS .app Info.plist, so the
+# version only ever needs to be bumped in exactly one place, here.
+APP_VERSION = "1.0.0"
+APP_AUTHOR = "unamundan"
+APP_COPYRIGHT = "\u00a9 unamundan 2026"
+APP_DESCRIPTION = "Seamless audio loop crossfading and extreme time-stretching utility"
+APP_URL = "https://github.com/unamundan/FermaLoop"
 
 import os
 import re
@@ -4038,6 +4051,7 @@ class LoopCrossfadeGUI:
             self._shortcuts_dialog = None
 
         tk, ttk = self.tk, self.ttk
+        import webbrowser
         dlg = tk.Toplevel(self.root)
         self._shortcuts_dialog = dlg
         dlg.title("Prefs and Help")
@@ -4101,6 +4115,16 @@ class LoopCrossfadeGUI:
             btn.configure(command=lambda n=name, b=btn: start_listening(n, b))
 
         # (shortcuts_frame's own bottom padding already provides margin)
+
+        tk.Frame(content, height=1, bg=BORDER).pack(fill="x", padx=12, pady=(8, 6))
+        footer_row = tk.Frame(content, bg=BG)
+        footer_row.pack(anchor="w", fill="x", padx=12, pady=(0, 10))
+        ttk.Label(footer_row, text=f"FermaLoop v{APP_VERSION}", background=BG, foreground=MUTED,
+                  font=("Segoe UI", 8)).pack(side="left")
+        link_label = tk.Label(footer_row, text=f"  \u2022  {APP_URL}", bg=BG, fg=ACCENT,
+                               font=("Segoe UI", 8, "underline"), cursor="hand2")
+        link_label.pack(side="left")
+        link_label.bind("<Button-1>", lambda e: webbrowser.open(APP_URL))
 
         dlg.update_idletasks()
         required_w, required_h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
