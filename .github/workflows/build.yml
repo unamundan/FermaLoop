@@ -74,10 +74,14 @@ jobs:
       - name: Generate Windows version-info file
         run: python generate_version_info.py FermaLoop.py version_info.txt
 
+      - name: Generate app icons
+        run: python generate_icons.py assets/FermaLoop_Icon.png icons
+
       - name: Build self-contained executable
         run: >
           pyinstaller --onedir --windowed --name FermaLoop
           --version-file version_info.txt
+          --icon icons/icon.ico
           --add-binary "ffmpeg.exe;."
           --collect-all sounddevice --collect-all tkinterdnd2
           FermaLoop.py
@@ -120,9 +124,21 @@ jobs:
           find ffmpeg_extracted -type f -name ffmpeg -exec cp {} ./ffmpeg \;
           chmod +x ffmpeg
 
+      - name: Generate app icons
+        run: python generate_icons.py assets/FermaLoop_Icon.png icons
+
+      - name: Convert iconset to .icns
+        run: iconutil -c icns icons/AppIcon.iconset -o icons/icon.icns
+        # iconutil is a macOS-only system tool (not available on the
+        # Windows runner), which is why this conversion is a separate,
+        # platform-specific step rather than folded into
+        # generate_icons.py itself -- that script only produces the
+        # iconset folder of PNGs, which is the cross-platform part.
+
       - name: Build self-contained .app
         run: >
           pyinstaller --onedir --windowed --name FermaLoop
+          --icon icons/icon.icns
           --add-binary "ffmpeg:."
           --collect-all sounddevice --collect-all tkinterdnd2
           FermaLoop.py
