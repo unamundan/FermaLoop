@@ -3035,9 +3035,35 @@ class LoopCrossfadeGUI:
         just don't do that by default. Without this, typing a value and
         pressing Enter left the field focused, so a SUBSEQUENT press of
         Space (meant as the global Play/Pause shortcut) typed a literal
-        space character into the field instead of toggling playback."""
-        entry_widget.bind("<Return>", lambda e: self.root.focus_set())
-        entry_widget.bind("<KP_Enter>", lambda e: self.root.focus_set())
+        space character into the field instead of toggling playback.
+
+        Defocuses to the entry's OWN owning toplevel (winfo_toplevel()),
+        not always self.root -- this same method is shared by entries
+        that live in other dialogs (e.g. PaulXStretch's factor/window
+        fields), where sending focus to the main window instead of back
+        to the dialog itself was the actual cause of two related, but
+        platform-different, bugs: on Windows, the modal dialog's own
+        grab_set() silently blocked focus from ever leaving for another
+        toplevel at all, so Return appeared to do nothing; on macOS the
+        focus_set() call succeeded, but the dialog (still transient/
+        grabbed) stayed visually on top while keyboard focus had
+        actually moved to the window underneath it -- an actual
+        Enter-behaves-differently-per-platform bug, not a lookalike.
+        For every entry that already lived in the main window, its own
+        winfo_toplevel() IS self.root, so this is a strict superset of
+        the old behavior, not a change to it, for every existing caller
+        except the two that were actually broken.
+
+        Returns "break" so this Return doesn't ALSO immediately trigger
+        a toplevel-level "Return activates the default button" binding
+        (see open_stretch_dialog) in the same keypress -- defocusing and
+        then activating the default action are meant to be two separate
+        presses, not one."""
+        def _defocus(e=None):
+            entry_widget.winfo_toplevel().focus_set()
+            return "break"
+        entry_widget.bind("<Return>", _defocus)
+        entry_widget.bind("<KP_Enter>", _defocus)
 
     def _transport_tooltip(self, action_name):
         """Looks up the display name/description from TRANSPORT_HINTS and
@@ -4523,8 +4549,28 @@ class LoopCrossfadeGUI:
                 result_label.configure(text=f"Failed: {ex}")
 
         btn_row = ttk.Frame(dlg); btn_row.pack(fill="x", padx=14, pady=14)
-        ttk.Button(btn_row, text="Cancel", command=close_dialog).pack(side="right", padx=(6, 0))
-        ttk.Button(btn_row, text="Stretch", style="Accent.TButton", command=apply_stretch).pack(side="right")
+        # Centered, not right-justified: an inner frame holding both
+        # buttons, packed into btn_row with no side/fill specified, lands
+        # centered horizontally by pack's own default cross-axis
+        # behavior (its default anchor is "center") rather than stuck to
+        # one edge.
+        btn_group = ttk.Frame(btn_row)
+        btn_group.pack()
+        ttk.Button(btn_group, text="Stretch", style="Accent.TButton", command=apply_stretch).pack(side="left")
+        ttk.Button(btn_group, text="Cancel", command=close_dialog).pack(side="left", padx=(6, 0))
+
+        # A SECOND Return/Enter (after the first has already defocused an
+        # entry field back to the dialog itself, see _defocus_on_return)
+        # activates Stretch, the same as clicking the button -- lets the
+        # whole "type a value, confirm, run it" flow stay on the keyboard.
+        dlg.bind("<Return>", lambda e: apply_stretch())
+        dlg.bind("<KP_Enter>", lambda e: apply_stretch())
+        # Cmd+. on macOS / Ctrl+. on Windows cancels, matching each
+        # platform's own long-standing "period to cancel/stop" convention
+        # (e.g. Cmd+. has cancelled dialogs and long-running operations in
+        # Mac software for decades).
+        cancel_key = "<Command-period>" if IS_MACOS else "<Control-period>"
+        dlg.bind(cancel_key, lambda e: close_dialog())
 
         # size to fit all content on first paint, respecting a larger saved size
         dlg.update_idletasks()
