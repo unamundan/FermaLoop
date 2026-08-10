@@ -4431,7 +4431,15 @@ class LoopCrossfadeGUI:
         footer_row.pack(anchor="w", fill="x", padx=12, pady=(0, 10))
         ttk.Label(footer_row, text=f"FermaLoop v{APP_VERSION}", background=BG, foreground=MUTED,
                   font=("Segoe UI", 8)).pack(side="left")
-        link_label = tk.Label(footer_row, text=f"  \u2022  {APP_URL}", bg=BG, fg=ACCENT,
+        # separator kept as its own plain (non-underlined, non-clickable)
+        # label -- previously the leading spaces + bullet were part of
+        # the SAME label as the URL, so the underline/accent-color
+        # styling made the whole thing (spacing and bullet included)
+        # visually read as one giant clickable link, when only the URL
+        # itself actually is one
+        ttk.Label(footer_row, text="  \u2022  ", background=BG, foreground=MUTED,
+                  font=("Segoe UI", 8)).pack(side="left")
+        link_label = tk.Label(footer_row, text=APP_URL, bg=BG, fg=ACCENT,
                                font=("Segoe UI", 8, "underline"), cursor="hand2")
         link_label.pack(side="left")
         link_label.bind("<Button-1>", lambda e: webbrowser.open(APP_URL))
