@@ -2281,11 +2281,20 @@ class ToolTip:
                     # their own first line instead.
                     row = tk.Frame(bullets_frame, bg=TOOLTIP_BG)
                     row.pack(fill="x", anchor="w", pady=2)
+                    # anchor="n" on the pack() call itself (not just the
+                    # anchor="nw" on the Label constructor, which only
+                    # controls the text's position WITHIN its own label,
+                    # not where the label widget sits within the row) --
+                    # without this, pack's default is to vertically
+                    # CENTER each side="left" sibling within the row's
+                    # full height, which for a wrapped 3-line description
+                    # put the bullet marker near the SECOND line instead
+                    # of aligned with the first.
                     tk.Label(row, text="\u2022", bg=TOOLTIP_BG, fg=MUTED,
-                             font=("Segoe UI", 9), width=2, anchor="nw").pack(side="left")
+                             font=("Segoe UI", 9), width=2, anchor="nw").pack(side="left", anchor="n")
                     tk.Label(row, text=bullet, bg=TOOLTIP_BG, fg=MUTED,
                              font=("Segoe UI", 9), wraplength=TOOLTIP_WRAPLENGTH - 32,
-                             justify="left", anchor="w").pack(side="left", fill="x")
+                             justify="left", anchor="w").pack(side="left", fill="x", anchor="n")
 
         else:
             label = tk.Label(self.tip, text=self.text, bg=TOOLTIP_BG, fg=FG,
