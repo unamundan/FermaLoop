@@ -4299,7 +4299,17 @@ class LoopCrossfadeGUI:
         self._shortcuts_dialog = dlg
         dlg.title("Prefs and Help")
         dlg.configure(bg=BG)
-        dlg.transient(self.root)
+        # Deliberately NOT calling dlg.transient(self.root) here (unlike
+        # the PaulXStretch dialog, which correctly uses it alongside
+        # grab_set() since THAT dialog is intentionally modal). Tk's own
+        # docs describe transient as "always appears in front of its
+        # parent" -- on macOS specifically, this was being enforced
+        # aggressively enough to actively steal focus back from the main
+        # window on a loop, breaking hover-based tooltips on ALL main-
+        # window widgets for as long as this (non-modal, no grab_set())
+        # dialog stayed open. This dialog was always meant to let the
+        # user freely interact with both windows at once -- transient()
+        # was directly undermining that, not supporting it.
 
         content = tk.Frame(dlg, bg=BG)
         content.pack(fill="both", expand=True)
