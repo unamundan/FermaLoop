@@ -1960,59 +1960,56 @@ class RoundedDropdown:
             self._close_popup()
             return
         tk = self.tk
-        x = self.canvas.winfo_rootx()
-        y = self.canvas.winfo_rooty() + self.canvas.winfo_height()
-        self.popup = tk.Toplevel(self.canvas)
-        self.popup.wm_overrideredirect(True)
-        # -topmost wasn't previously set here (unlike ToolTip, which does
-        # set it) -- without it, an overrideredirect popup can end up
-        # visually present but not properly registered as the frontmost,
-        # click-receiving surface with macOS's window server, which is
-        # consistent with clicks on its rows being unreliable rather than
-        # the popup simply not appearing at all.
-        try:
-            self.popup.wm_attributes("-topmost", True)
-        except Exception:
-            pass
+        toplevel = self.canvas.winfo_toplevel()
+        # Renders as an ordinary Frame placed WITHIN the main window's own
+        # widget tree, not a separate floating Toplevel window. Confirmed
+        # (by moving the main window and watching a fully-functional menu
+        # appear, detached, behind it) that the previous overrideredirect
+        # Toplevel approach was reliably being created and positioned
+        # correctly -- it just wasn't staying above the main window in
+        # macOS's cross-window stacking order, no matter what combination
+        # of -topmost/focus_force/lift/deferred-timing was tried. Since
+        # this is now a plain Frame inside the SAME window as everything
+        # else, there's no cross-window z-order for macOS's window server
+        # to get wrong -- .lift() here is Tk's own internal sibling
+        # stacking within one window, a fundamentally more reliable
+        # operation than raising one whole window above another.
+        toplevel.update_idletasks()
+        x = self.canvas.winfo_rootx() - toplevel.winfo_rootx()
+        y = self.canvas.winfo_rooty() - toplevel.winfo_rooty() + self.canvas.winfo_height()
+
         row_h = 30
-        self.popup.wm_geometry(f"{self.fixed_width}x{len(self.values) * row_h}+{x}+{y}")
-        frame = tk.Frame(self.popup, bg=self.field_bg, highlightthickness=1, highlightbackground=self.border)
-        frame.pack(fill="both", expand=True)
+        self.popup = tk.Frame(toplevel, bg=self.field_bg, highlightthickness=1,
+                               highlightbackground=self.border)
+        self.popup.place(x=x, y=y, width=self.fixed_width, height=len(self.values) * row_h)
         for val in self.values:
-            row = tk.Label(frame, text=val, bg=self.field_bg, fg=self.fg, anchor="w",
+            row = tk.Label(self.popup, text=val, bg=self.field_bg, fg=self.fg, anchor="w",
                             font=("Segoe UI", 10), padx=12, pady=6)
             row.pack(fill="x")
             row.bind("<Enter>", lambda e, r=row: r.configure(bg=self.accent))
             row.bind("<Leave>", lambda e, r=row: r.configure(bg=self.field_bg))
             row.bind("<Button-1>", lambda e, v=val: self._select(v))
-        # Deliberately NOT closing on <FocusOut>: overrideredirect popups
-        # are known to get unreliable/premature FocusOut events from
-        # macOS's window server specifically (reported: the popup would
-        # frequently vanish just from moving the mouse toward it, before
-        # a row could even be clicked -- consistent with a spurious focus
-        # event, not an actual click elsewhere). Closing now only happens
-        # via selecting a row or clicking the dropdown button again to
-        # toggle it shut, both of which are reliable on every platform.
-        #
-        # focus_force() (not focus_set()) plus lift(), and both deferred
-        # slightly rather than called synchronously right after creating
-        # the window: macOS's window server can take a beat to fully
-        # register a freshly-created overrideredirect Toplevel as an
-        # actual click-receiving surface, and asking for focus/raising it
-        # before that settles is a plausible explanation for "the first
-        # click or two doesn't register, but eventually it does" -- the
-        # reported symptom here. This still runs well within what reads
-        # as instantaneous to a person clicking a dropdown.
         self.popup.lift()
-        self.popup.after(30, self._settle_popup_focus)
 
-    def _settle_popup_focus(self):
-        if self.popup is not None:
-            try:
-                self.popup.lift()
-                self.popup.focus_force()
-            except Exception:
-                pass
+        # Click-outside-to-close: safe to bind directly on the owning
+        # toplevel now (not bind_all), since it's cleanly unbound the
+        # moment the popup closes either way -- no risk to other,
+        # unrelated app-wide bindings.
+        self._outside_click_id = toplevel.bind(
+            "<Button-1>", self._on_click_outside, add="+")
+
+    def _on_click_outside(self, event):
+        if self.popup is None:
+            return
+        # ignore the click that's opening/closing the dropdown itself --
+        # its own <Button-1> handler (_toggle_popup) manages that case
+        if event.widget is self.canvas:
+            return
+        px, py = self.popup.winfo_rootx(), self.popup.winfo_rooty()
+        pw, ph = self.popup.winfo_width(), self.popup.winfo_height()
+        if px <= event.x_root <= px + pw and py <= event.y_root <= py + ph:
+            return  # inside the popup -- its own row bindings handle selection
+        self._close_popup()
 
     def _select(self, val):
         self.variable.set(val)
@@ -2025,6 +2022,13 @@ class RoundedDropdown:
             except Exception:
                 pass
             self.popup = None
+        outside_id = getattr(self, "_outside_click_id", None)
+        if outside_id is not None:
+            try:
+                self.canvas.winfo_toplevel().unbind("<Button-1>", outside_id)
+            except Exception:
+                pass
+            self._outside_click_id = None
 
     def pack(self, **kw):
         self.frame.pack(**kw)
