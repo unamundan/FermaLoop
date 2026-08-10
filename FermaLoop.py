@@ -2709,6 +2709,21 @@ class LoopCrossfadeGUI:
 
         self.root = TkinterDnD.Tk() if DND_AVAILABLE else tk.Tk()
         _log_startup("tk root window created")
+        # Hidden immediately, shown only once at the very end of __init__
+        # (see the matching deiconify() there) -- without this, the
+        # window is visible from the instant it's created, meaning every
+        # subsequent step below (building all the widgets, the box-
+        # layout measurement passes that repack the CURVE/XFADE/LOOP
+        # boxes multiple times, the geometry()/minsize() calls, the
+        # temporary worst-case status text swap for height measurement)
+        # all happened live, in full view, one after another -- read as
+        # rapid, jittery window flashing/resizing at startup, reported
+        # as worse on Windows specifically (plausibly because Windows'
+        # own compositing is less forgiving of rapid successive redraws
+        # than macOS's tends to be, though the ROOT cause -- doing all
+        # this setup work with the window already visible -- was never
+        # actually platform-specific).
+        self.root.withdraw()
         self.root.title("FermaLoop")
         self.root.configure(bg=BG)
         # Sets the RUNNING window's own icon -- separate from and in
@@ -2812,6 +2827,14 @@ class LoopCrossfadeGUI:
 
         self._apply_saved_or_natural_size()
         _log_startup("_apply_saved_or_natural_size() done -- launch sequence complete")
+        # NOW show the window, for the first time -- everything above
+        # this point (all widget construction, box-layout measurement/
+        # repacking, geometry/minsize, the worst-case status-height
+        # measurement) has happened invisibly while withdrawn, so what
+        # actually appears on screen is the final, already-settled
+        # window in one shot, not a rapid sequence of intermediate ones.
+        self.root.deiconify()
+        _log_startup("window shown (deiconify)")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._poll_playhead()
@@ -3192,7 +3215,7 @@ class LoopCrossfadeGUI:
                      highlightthickness=0).pack(side="left")
         else:
             ttk.Label(header_row, text="FermaLoop", style="Heading.TLabel").pack(side="left")
-        btn_gear = self._make_icon_button(header_row, "gear", "Prefs and Help",
+        btn_gear = self._make_icon_button(header_row, "gear", "Preferences and Help",
                                            self.open_shortcuts_dialog, size=20)
         btn_gear.pack(side="right")
 
@@ -4600,6 +4623,23 @@ class LoopCrossfadeGUI:
         dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))
         dlg.minsize(required_w, required_h)
 
+        # Explicitly claim OS-level keyboard focus for this dialog --
+        # grab_set() restricts input to WITHIN this dialog's own
+        # hierarchy, but doesn't by itself guarantee the dialog actually
+        # becomes the active/focused window. Reported on Windows
+        # specifically: the dialog appeared visually on top, but its own
+        # titlebar looked inactive while the main window's stayed active
+        # -- meaning Return/Enter was still being delivered to the main
+        # window, not this dialog or its entry fields, so accepting the
+        # default Stretch factor/window size via the keyboard silently
+        # did nothing. Focusing the first entry field directly both
+        # fixes that and lets someone start typing immediately without
+        # needing to click first. The deferred re-assertion is a safety
+        # net for the same class of "window server needs a beat to
+        # settle" timing issue already seen with the Format dropdown.
+        factor_entry.entry.focus_force()
+        dlg.after(50, lambda: factor_entry.entry.focus_force() if dlg.winfo_exists() else None)
+
     def _poll_playhead(self):
         if self.data is not None and self.player.playing:
             self._redraw()
@@ -4744,7 +4784,7 @@ class LoopCrossfadeGUI:
         import webbrowser
         dlg = tk.Toplevel(self.root)
         self._shortcuts_dialog = dlg
-        dlg.title("Prefs and Help")
+        dlg.title("Preferences and Help")
         dlg.configure(bg=BG)
         # Deliberately NOT calling dlg.transient(self.root) here (unlike
         # the PaulXStretch dialog, which correctly uses it alongside
@@ -4788,12 +4828,21 @@ class LoopCrossfadeGUI:
         shortcuts_frame = tk.Frame(content, bg=BG)
         shortcuts_frame.pack(fill="x", padx=12, pady=(0, 10))
 
+        # 2px trimmed off the top and bottom of the base "TButton" style's
+        # own padding (explicitly 8px uniform, set in _build_style --
+        # not a guessed/unknown OS theme default), tightening each
+        # shortcut-key button's own height without touching horizontal
+        # padding or any other button elsewhere in the app that still
+        # uses the base TButton/Accent.TButton styles.
+        ttk.Style().configure("ShortcutKey.TButton", padding=(8, 6, 8, 6))
+
         rows = {}
         for i, (name, label) in enumerate(SHORTCUT_LABELS.items()):
             ttk.Label(shortcuts_frame, text=label, background=BG, foreground=FG).grid(
                 row=i, column=0, sticky="w", pady=1)
             raw_key = self.shortcuts.get(name, DEFAULT_SHORTCUTS[name])
-            btn = ttk.Button(shortcuts_frame, text=format_key_for_display(raw_key), width=14)
+            btn = ttk.Button(shortcuts_frame, text=format_key_for_display(raw_key), width=14,
+                              style="ShortcutKey.TButton")
             btn.grid(row=i, column=1, padx=(10, 0), pady=1)
             rows[name] = btn
 
