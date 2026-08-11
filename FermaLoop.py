@@ -5118,25 +5118,37 @@ class LoopCrossfadeGUI:
         if self.data is None:
             return
 
-        if self.preview_mode and not silent:
+        if self.export_mode == "loop" and not silent:
             # Explicit L press while LOOP is the current mode: turn it
-            # off. _exit_preview_mode already does exactly the right
-            # thing for both cases -- hot-swaps to keep playing (now
-            # raw) if genuinely playing, or just resets internal state
-            # without starting anything if not -- so this no longer
-            # forces a stop afterward the way it used to. That
-            # unconditional stop() was the actual bug: it stopped
-            # playback even when the hot-swap just above had JUST
-            # successfully kept it running. L/R only ever change WHAT's
-            # playing now; Space/Stop are the only things that actually
-            # start or stop it.
+            # off. Gated on export_mode, not preview_mode -- LOOP can be
+            # the chosen mode (export_mode=="loop") WITHOUT preview_mode
+            # ever having become True, specifically via the "armed but
+            # not playing" branch below, which sets export_mode alone
+            # without loading/computing anything. Gating this on
+            # preview_mode meant a second press while merely armed never
+            # recognized LOOP as active at all, and fell through to the
+            # "arm" branch again instead -- re-arming the SAME mode,
+            # which looked exactly like nothing had happened. Confirmed
+            # directly: click LOOP once (arms, icon goes static blue),
+            # click again, and it stayed on instead of turning off.
+            #
+            # _exit_preview_mode already does exactly the right thing
+            # for both cases -- hot-swaps to keep playing (now raw) if
+            # genuinely playing, or just resets internal state without
+            # starting anything if not (including a no-op if
+            # preview_mode was never True to begin with, e.g. the
+            # armed-but-never-played case this fix specifically covers)
+            # -- so this no longer forces a stop afterward the way it
+            # used to. L/R only ever change WHAT's playing now;
+            # Space/Stop are the only things that actually start or
+            # stop it.
             self._exit_preview_mode()
             self._set_export_mode("raw")
             if self.player.playing:
                 self.status_var.set("Switched to raw playback.")
             else:
                 self._set_play_pause_icon(False)
-                self.status_var.set("Stopped auditioning.")
+                self.status_var.set("LOOP turned off.")
             self._update_auto_crossfade_preview()  # otherwise the live value under
                                                      # Auto-detect is left showing
                                                      # whatever it last was mid-audition
