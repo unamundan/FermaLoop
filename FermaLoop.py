@@ -4051,7 +4051,7 @@ class LoopCrossfadeGUI:
         self._update_selection_duration_label()
         self._update_auto_crossfade_preview()
         dur = len(data) / sr
-        self.status_var.set(f"Loaded {os.path.basename(path)} ({dur:.2f}s). Select a region, Audition to preview the loop, then Process & Save.")
+        self.status_var.set(f"Loaded {os.path.basename(path)} ({dur:.2f}s). Select a region, then LOOP or REPEAT to preview, or Save directly.")
 
     # ---------------- undo / redo ----------------
 
@@ -4977,6 +4977,12 @@ class LoopCrossfadeGUI:
                                                  # above -- Stop also changes
                                                  # player.playing, which the icon's
                                                  # spinning state now depends on
+        self.status_var.set("Stopped.")  # previously never touched the status bar at
+                                          # all, so it just kept showing whatever
+                                          # playback message was there before -- e.g.
+                                          # LOOP's own "click LOOP again to stop"
+                                          # message, still displayed after having
+                                          # already stopped via THIS button instead
         self._redraw()
 
     def on_rewind(self):
@@ -5022,6 +5028,23 @@ class LoopCrossfadeGUI:
         # for Space or Save to act on, rather than forcing playback on
         # every press, which could otherwise interrupt someone who just
         # wants to pick a mode and Save immediately.
+        #
+        # This never updated the status bar at all, in any of its four
+        # cases -- reported directly: the message stayed on whatever
+        # LOOP had last set (with its own now-fixed stale wording),
+        # regardless of switching to REPEAT, or turning either off.
+        # Mirrors on_loop_preview's own wording exactly for the parallel
+        # cases (armed/turned-off), for consistency.
+        if new_value:
+            if self.player.playing:
+                self.status_var.set("Looping with declicked edges. Click REPEAT again to stop.")
+            else:
+                self.status_var.set("REPEAT armed. Press Space to preview, or Save to export.")
+        else:
+            if self.player.playing:
+                self.status_var.set("Switched to raw playback.")
+            else:
+                self.status_var.set("REPEAT turned off.")
 
     def _read_process_params(self, silent=False):
         """Validates and returns (xfade_seconds_or_None, curve, snap, window)
@@ -5079,7 +5102,7 @@ class LoopCrossfadeGUI:
             self.auto_xfade_value_var.set(f"\u2248 {xfade * 1000:.0f} ms")
             self.status_var.set(
                 f"Auto-detected crossfade for the current selection: {xfade * 1000:.0f} ms. "
-                f"Click Audition Loop to preview it, or Process & Save to use it."
+                f"Click LOOP to preview it, or Save to use it."
             )
         except Exception:
             self.auto_xfade_value_var.set("")  # non-fatal -- this is just a live status hint
@@ -5242,7 +5265,7 @@ class LoopCrossfadeGUI:
             self.status_var.set(
                 f"Looping the processed preview ({dur:.2f}s, crossfade {used_xfade*1000:.0f} ms, "
                 f"computed in {elapsed*1000:.0f} ms). Click within the selection to scrub, adjust "
-                f"settings to update live, or click Audition Loop again to stop."
+                f"settings to update live, or click LOOP again to stop."
             )
         except Exception as e:
             self.status_var.set("Audition failed.")
