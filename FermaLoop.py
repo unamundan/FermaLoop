@@ -4791,11 +4791,25 @@ class LoopCrossfadeGUI:
         """The ONLY way export_mode should ever change -- called
         exclusively from the two toggle handlers (on_repeat_toggle,
         on_loop_preview) and from load_file/unload_file. Refreshes the
-        button label and Save As suffix together, since both derive
-        from this single value now."""
+        button label, Save As suffix, AND both transport icons together,
+        since all three now derive from this single value.
+
+        The icon refresh matters more than it looks: _exit_preview_mode
+        (called just before this, from both toggle handlers) does its
+        OWN icon refresh internally, but at that point export_mode is
+        still whatever it was BEFORE this call -- so that refresh reads
+        a stale value and leaves the Loop icon showing the OLD mode's
+        color. This call runs after export_mode is actually updated, so
+        it corrects that stale read. Confirmed directly: toggling LOOP
+        off, or switching from LOOP to REPEAT mid-playback, left the
+        Loop icon showing blue (the old "loop" reading) even though the
+        Save button had already correctly updated -- the two disagreed
+        because only the button/suffix were refreshed here before, not
+        the icons."""
         self.export_mode = mode
         self._refresh_process_button_label()
         self._update_save_as_suffix()
+        self._refresh_loop_and_repeat_icons()
 
     def _refresh_process_button_label(self):
         """Keeps the Process & Save button's own label AND hover tooltip
@@ -4959,6 +4973,15 @@ class LoopCrossfadeGUI:
                 self.player.set_loop(self.export_mode == "repeat", declick_wrap=True)
                 self.player.play()
             self._set_play_pause_icon(True)
+            self._refresh_loop_and_repeat_icons()  # symmetric with the pause branch
+                                                     # above -- LOOP's icon needs to
+                                                     # start spinning again on resume,
+                                                     # the same way it correctly drops
+                                                     # to static on pause. Missing here
+                                                     # before: resuming a paused LOOP
+                                                     # preview left the icon stuck
+                                                     # static even though audio (and
+                                                     # player.playing) had resumed.
 
     def on_stop(self):
         self._flash_button(self.btn_stop)
@@ -4999,7 +5022,10 @@ class LoopCrossfadeGUI:
         # plain non-preview toggle path below -- this covers all of them
         # with one idempotent call.
         self.player.set_loop(self.repeat_var.get(), declick_wrap=True)
-        self._set_export_mode("repeat" if new_value else "raw")
+        self._set_export_mode("repeat" if new_value else "raw")  # this already
+                                                                    # refreshes BOTH
+                                                                    # transport icons
+                                                                    # internally now
         # No auto-play from a stopped state anymore -- R/L now only ever
         # affect ALREADY-playing audio (live-switch, above), never start
         # playback on their own. That auto-play was added a few rounds
@@ -5010,7 +5036,6 @@ class LoopCrossfadeGUI:
         # for Space or Save to act on, rather than forcing playback on
         # every press, which could otherwise interrupt someone who just
         # wants to pick a mode and Save immediately.
-        self._refresh_repeat_icon()
 
     def _read_process_params(self, silent=False):
         """Validates and returns (xfade_seconds_or_None, curve, snap, window)
