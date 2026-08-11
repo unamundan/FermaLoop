@@ -785,9 +785,9 @@ SHORTCUT_LABELS = {
     "play_pause": "Play / Pause",
     "stop": "Stop",
     "rewind": "Rewind",
-    "loop_toggle": "Repeat (loop raw selection)",
+    "loop_toggle": "Repeat (declicked edges preview)",
     "crop": "Crop to Selection",
-    "audition": "Loop (crossfade preview)",
+    "audition": "Loop (crossfaded edges preview)",
     "undo": "Undo",
     "redo": "Redo",
     "zoom_in": "Zoom In (Scroll Up)",
@@ -3181,6 +3181,14 @@ class LoopCrossfadeGUI:
         self.selection_duration_var = tk.StringVar(value="Selection: --")
         self._click_flag = None       # (x_pixel, time_str) or None
         self._click_flag_after_id = None
+        self._hover_flag = None       # (x_pixel, time_str) or None -- same shape/
+                                       # rendering as _click_flag (both drawn via
+                                       # _draw_flag), but a separate lifecycle: shown
+                                       # after a brief dwell while passively hovering,
+                                       # cleared immediately on Leave or once a
+                                       # click/drag begins, rather than the click
+                                       # flag's own fixed 1.5s auto-clear timer
+        self._hover_flag_after_id = None
         self._live_update_after_id = None
         self._canvas_tooltip = None
         self._shortcuts_dialog = None
@@ -3633,6 +3641,8 @@ class LoopCrossfadeGUI:
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+        self.canvas.bind("<Motion>", self._on_canvas_motion)
+        self.canvas.bind("<Leave>", self._on_canvas_leave)
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)     # Windows / macOS
         self.canvas.bind("<Button-4>", self._on_mousewheel)       # Linux scroll up
         self.canvas.bind("<Button-5>", self._on_mousewheel)       # Linux scroll down
@@ -4055,6 +4065,9 @@ class LoopCrossfadeGUI:
         self._update_save_as_suffix()
 
         self._click_flag = None
+        self._cancel_hover_flag()  # defensive consistency with the click flag reset
+                                    # just above -- a fresh load shouldn't carry over
+                                    # any stale hover state from before
         self._redraw()
         self._update_selection_duration_label()
         self._update_auto_crossfade_preview()
@@ -4212,7 +4225,16 @@ class LoopCrossfadeGUI:
                                                   font=("Segoe UI", 8), anchor="s")
             t += interval
 
-        if self._click_flag is not None:
+        # Hover takes precedence over the click flag if both are somehow
+        # active at once (e.g. clicked, then immediately hovered nearby
+        # while the click flag's own 1.5s timer hadn't expired yet) --
+        # hover reflects the CURRENT cursor position, which is more
+        # relevant than a static, aging click location; drawing both
+        # would just overlap.
+        if self._hover_flag is not None:
+            fx, ftext = self._hover_flag
+            self._draw_flag(fx, ftext, w)
+        elif self._click_flag is not None:
             fx, ftext = self._click_flag
             self._draw_flag(fx, ftext, w)
 
@@ -4383,6 +4405,51 @@ class LoopCrossfadeGUI:
         self._click_flag = None
         self._click_flag_after_id = None
         self._redraw_timeline()
+
+    def _on_canvas_motion(self, event):
+        """Shows the time under the cursor after a brief dwell -- distinct
+        from _show_click_flag (which fires immediately on an actual click
+        and auto-clears after a fixed 1.5s): this is for PASSIVE hovering,
+        debounced so it only appears once the mouse has been reasonably
+        still, rather than flickering on every pixel of movement while
+        just passing through on the way somewhere else. Suppressed
+        entirely while actively dragging a selection/edge (drag_mode is
+        not None): <Motion> fires alongside <B1-Motion> for the same
+        movement, and a drag already has its own visual feedback (the
+        selection itself, plus the click flag once released) -- showing
+        a second, hover-driven flag at the same time would clutter the
+        timeline rather than help."""
+        if self.data is None or self.drag_mode is not None:
+            self._cancel_hover_flag()
+            return
+        w = self.canvas.winfo_width()
+        samp = max(0, min(self._x_to_sample(event.x, w), len(self.data)))
+        if self._hover_flag_after_id is not None:
+            try:
+                self.root.after_cancel(self._hover_flag_after_id)
+            except Exception:
+                pass
+        self._hover_flag_after_id = self.root.after(
+            200, lambda x=event.x, s=samp: self._show_hover_flag(x, s))
+
+    def _show_hover_flag(self, x_pixel, sample):
+        self._hover_flag_after_id = None
+        self._hover_flag = (x_pixel, format_time(sample / self.sr))
+        self._redraw_timeline()
+
+    def _on_canvas_leave(self, event):
+        self._cancel_hover_flag()
+
+    def _cancel_hover_flag(self):
+        if self._hover_flag_after_id is not None:
+            try:
+                self.root.after_cancel(self._hover_flag_after_id)
+            except Exception:
+                pass
+            self._hover_flag_after_id = None
+        if self._hover_flag is not None:
+            self._hover_flag = None
+            self._redraw_timeline()
 
     def _on_canvas_press(self, event):
         if self.data is None:
@@ -5764,12 +5831,11 @@ class LoopCrossfadeGUI:
 
         ttk.Label(content, text="HINTS", background=BG, foreground=FG,
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=12, pady=(0, 4))
-        for hint in ("Drag to select; drag edges to adjust",
+        for hint in ("Click and drag to select; drag white edge bars to adjust target selection",
                      "Click in waveform to move playhead",
-                     "Enable REPEAT or LOOP to audition effect",
                      "Optional: Stretch selection with PaulXStretch",
                      "Set desired LOOP XFade Curve/Overlap & Alignment options",
-                     "Enable REPEAT or LOOP before saving to process selection",
+                     "Enable REPEAT or LOOP to audition; ensure one is still enabled before saving to process",
                      "Crop and save"):
             ttk.Label(content, text=f"\u2022 {hint}", background=BG, foreground=MUTED,
                       font=("Segoe UI", 9)).pack(anchor="w", padx=22, pady=1)
