@@ -467,6 +467,31 @@ def _crossfade_core(data, xfade_n, curve):
     return np.concatenate([blended, middle], axis=0)
 
 
+def declick_edges(data, samplerate, fade_seconds=0.05):
+    """Applies a short raised-cosine fade-IN at the very start and fade-OUT
+    at the very end of `data`, WITHOUT shortening it or blending head into
+    tail the way loop_crossfade() does -- this is REPEAT mode's export
+    counterpart: same automatic, non-user-adjustable edge treatment as the
+    live wrap declick in AudioPlayer._callback (same curve shape, same
+    default duration), just baked into the file instead of applied live
+    during playback, so what Repeat previews and what it exports sound
+    the same way at the loop point when the file is looped externally.
+
+    Deliberately the SAME curve as the live declick (1-cos(t*pi/2) for the
+    fade-in, cos(t*pi/2) for the fade-out) rather than loop_crossfade's
+    equal-power/linear options -- this path has no curve CHOICE, matching
+    the "automatic, not user-adjustable" design for REPEAT exports."""
+    n = len(data)
+    fade_n = max(1, min(int(round(fade_seconds * samplerate)), n // 2))
+    out = data.astype(np.float64, copy=True)
+    t = np.linspace(0.0, 1.0, fade_n, endpoint=False)
+    fade_in = 1.0 - np.cos(t * np.pi / 2)
+    fade_out = np.cos(t * np.pi / 2)
+    out[:fade_n] *= fade_in[:, None]
+    out[n - fade_n:] *= fade_out[:, None]
+    return out.astype(data.dtype, copy=False)
+
+
 def loop_crossfade(data, samplerate, xfade_seconds, curve="equal_power"):
     was_1d = (data.ndim == 1)
     if was_1d:
@@ -700,9 +725,9 @@ DEFAULT_SHORTCUTS = {
     "play_pause": "space",
     "stop": "s",
     "rewind": "Home",
-    "loop_toggle": "l",
+    "loop_toggle": "r",
     "crop": "c",
-    "audition": "a",
+    "audition": "l",
     "undo": _UNDO_KEY,
     "redo": _REDO_KEY,
     "zoom_in": "equal",
@@ -735,9 +760,8 @@ SHORTCUT_LABELS = {
 TRANSPORT_HINTS = {
     "play_pause": ("Play / Pause", "Activate / freeze playback"),
     "stop": ("Stop", "Stop playback"),
-    "loop_toggle": ("Repeat", "Loop raw selection without crossfade "
-                              "(a click will likely be heard at the seam)"),
-    "audition": ("Loop", "Preview processed crossfade, looped"),
+    "loop_toggle": ("Repeat", "Audition Declicked (Process & Save: Declicked)"),
+    "audition": ("Loop", "Audition Crossfaded (Process & Save: Crossfaded)"),
     "crop": ("Crop Selected", "Remove unselected audio"),
     "stretch": ("Stretch", "Open PaulXStretch for extreme time-stretching of the current selection"),
 }
@@ -803,6 +827,20 @@ def load_shortcuts(path=SHORTCUTS_PATH):
                 if merged.get("redo") == "Shift-Control-z":
                     merged["redo"] = DEFAULT_SHORTCUTS["redo"]
                 merged["_mac_defaults_migrated"] = True
+            # Same pattern, same reason, for the REPEAT/LOOP key swap
+            # (loop_toggle "l"->"r", audition "a"->"l") -- since this app
+            # auto-saves the full shortcuts set on every close, ANY
+            # existing user's file already has the OLD values explicitly
+            # stored even if they never touched these two, which would
+            # otherwise silently keep overriding the new defaults
+            # forever. Platform-independent (unlike the migration above),
+            # since this swap isn't a per-OS default difference.
+            if not saved.get("_repeat_loop_keys_migrated"):
+                if merged.get("loop_toggle") == "l":
+                    merged["loop_toggle"] = DEFAULT_SHORTCUTS["loop_toggle"]
+                if merged.get("audition") == "a":
+                    merged["audition"] = DEFAULT_SHORTCUTS["audition"]
+                merged["_repeat_loop_keys_migrated"] = True
             return merged
         except Exception:
             return dict(DEFAULT_SHORTCUTS)
@@ -948,6 +986,15 @@ class AudioPlayer:
         self.on_natural_stop = None  # optional callback, called from GUI thread via `after`
         self.declick_total = 1        # samples in the current declick fade-in ramp
         self.declick_remaining = 0    # samples of that ramp still left to apply
+        self.pending_cursor = None    # target cursor once an in-progress fade-out completes
+        self.fadeout_remaining = 0    # samples of the pre-jump fade-out still left to apply
+        self.declick_loop_wrap = False  # True: REPEAT's raw loop -- wrap gets the same
+                                         # fade-out/fade-in as a seek. False: an already
+                                         # crossfade-PROCESSED preview buffer (Audition/LOOP),
+                                         # whose wrap point is already seamless at the
+                                         # waveform level -- declicking it again would be
+                                         # redundant at best and could dip an already-smooth
+                                         # loop's volume for no reason.
 
     def load(self, data, sr):
         self.stop()
@@ -997,17 +1044,33 @@ class AudioPlayer:
         with self.lock:
             if self.data is None:
                 return
-            self.cursor = max(0, min(sample, len(self.data)))
+            target = max(0, min(sample, len(self.data)))
             if self.playing:
-                self._apply_bounds_from_cursor()
-                # clicking to a new position while playing creates a sudden
-                # amplitude discontinuity at the jump (the waveform doesn't
-                # connect smoothly to wherever it was before) -- that's what
-                # causes the audible pop. A very short fade-in smooths it out.
-                self.declick_remaining = self.declick_total
+                # Don't jump immediately -- fade the CURRENTLY PLAYING
+                # material out first (handled in _callback via
+                # pending_cursor/fadeout_remaining), THEN jump and fade
+                # the new material in via the existing declick ramp
+                # below. Jumping immediately only smoothed the incoming
+                # side of the cut; the outgoing side stopped abruptly at
+                # whatever amplitude it happened to be, which could click
+                # just as audibly as an unfaded start would have.
+                self.pending_cursor = target
+                self.fadeout_remaining = self.declick_total
+            else:
+                self.cursor = target
 
-    def set_loop(self, value):
+    def set_loop(self, value, declick_wrap):
+        # declick_wrap has NO default -- every caller must say explicitly
+        # whether this loop's wrap point should be declicked (REPEAT's
+        # raw selection) or left alone (an already-processed Audition/
+        # LOOP preview buffer, whose seam is already seamless at the
+        # waveform level). A silently-wrong default here would mean
+        # either an unwanted dip in an already-smooth processed loop, or
+        # REPEAT quietly going back to clicking -- both are exactly the
+        # class of bug that's easy to miss without forcing every call
+        # site to state its intent.
         self.loop = bool(value)
+        self.declick_loop_wrap = bool(declick_wrap)
         with self.lock:
             if self.data is not None and self.playing:
                 self._apply_bounds_from_cursor()
@@ -1036,21 +1099,103 @@ class AudioPlayer:
             if self.data is None:
                 outdata[:] = 0
                 raise _sd.CallbackStop
+
+            # Proactively arm the SAME fade-out/jump/fade-in machinery
+            # used for an explicit seek, as soon as the cursor comes
+            # within one declick window of the loop's wrap point -- a
+            # loop wrap IS, functionally, just a seek from play_end back
+            # to play_start, so there's no need for separate wrap-
+            # specific fade logic. Only for REPEAT's raw loop
+            # (declick_loop_wrap); an already crossfade-processed
+            # Audition/LOOP preview buffer is left alone here entirely,
+            # since its wrap point is already seamless and doesn't need
+            # (or want) this. fadeout_remaining is set to the ACTUAL
+            # remaining distance to play_end, not always the full
+            # declick_total, so the fade lands at exactly zero gain
+            # precisely at play_end regardless of which callback first
+            # detects the condition.
+            if (self.declick_loop_wrap and self.play_loop and self.pending_cursor is None
+                    and 0 < self.play_end - self.cursor <= self.declick_total):
+                self.pending_cursor = self.play_start
+                self.fadeout_remaining = self.play_end - self.cursor
+
+            write_offset = 0
+            if self.pending_cursor is not None:
+                # A jump is pending: fade the CURRENTLY PLAYING material
+                # out first, then jump and fade the new material in below
+                # -- see set_cursor() for why this exists. Deliberately
+                # NOT splitting this into a separate helper: it needs to
+                # write directly into `outdata` at a running offset and
+                # interact with the exact same cursor/bounds state as the
+                # normal chunk-production code right below it.
+                avail = max(0, len(self.data) - self.cursor)
+                nfo = min(frames, self.fadeout_remaining, avail)
+                if nfo > 0:
+                    chunk = self.data[self.cursor:self.cursor + nfo]
+                    ch = outdata.shape[1]
+                    if chunk.shape[1] != ch:
+                        chunk = np.tile(chunk[:, :1], (1, ch)) if chunk.shape[1] == 1 else chunk[:, :ch]
+                    # Exact mirror of the fade-IN curve below: starts at
+                    # gain 1.0 (no abruptness at the moment the fade
+                    # begins) and eases down to 0 with the same
+                    # raised-cosine shape, just run in reverse.
+                    t_start = 1.0 - self.fadeout_remaining / self.declick_total
+                    t_end = 1.0 - (self.fadeout_remaining - nfo) / self.declick_total
+                    t = np.linspace(t_start, t_end, nfo, endpoint=False)
+                    gains = np.cos(t * np.pi / 2).astype(np.float32).reshape(-1, 1)
+                    outdata[:nfo] = chunk * gains
+                    self.cursor += nfo
+                    self.fadeout_remaining -= nfo
+                    write_offset = nfo
+                else:
+                    self.fadeout_remaining = 0
+                if self.cursor >= len(self.data):
+                    # Ran out of source samples to fade through before
+                    # fadeout_remaining reached zero on its own (e.g. the
+                    # outgoing position was close to the very end of the
+                    # file) -- force the jump to complete anyway, since
+                    # there's nothing left to fade. Without this, a seek
+                    # away from near-the-end-of-file could leave
+                    # pending_cursor permanently unresolved: this same
+                    # branch's completion check only looked at whether
+                    # fadeout_remaining had counted down to zero, not at
+                    # whether the SOURCE material to fade through had
+                    # simply run out first.
+                    self.fadeout_remaining = 0
+                if self.fadeout_remaining <= 0:
+                    # Fade-out complete (or ran out of source samples to
+                    # fade through, e.g. the outgoing position was right
+                    # at the end of the file) -- jump now. Whatever's left
+                    # of THIS callback's frames continues below using the
+                    # new cursor, starting the existing fade-in -- most of
+                    # the time this means one callback produces a tiny
+                    # sliver of fade-out immediately followed by the start
+                    # of the fade-in, rather than needing a second
+                    # callback round-trip to begin the incoming side.
+                    self.cursor = self.pending_cursor
+                    self.pending_cursor = None
+                    self._apply_bounds_from_cursor()
+                    self.declick_remaining = self.declick_total
+
+            frames_left = frames - write_offset
+            if frames_left <= 0:
+                return
+
             remaining = self.play_end - self.cursor
             if remaining <= 0:
                 if self.play_loop:
                     self.cursor = self.play_start
                     remaining = self.play_end - self.cursor
                 else:
-                    outdata[:] = 0
+                    outdata[write_offset:] = 0
                     self.playing = False
                     raise _sd.CallbackStop
-            n = min(frames, remaining)
+            n = min(frames_left, remaining)
             chunk = self.data[self.cursor:self.cursor + n]
             ch = outdata.shape[1]
             if chunk.shape[1] != ch:
                 chunk = np.tile(chunk[:, :1], (1, ch)) if chunk.shape[1] == 1 else chunk[:, :ch]
-            outdata[:n] = chunk
+            outdata[write_offset:write_offset + n] = chunk
             if self.declick_remaining > 0:
                 # only applied here (the jump-origin chunk) -- deliberately
                 # NOT applied to the loop-wrap continuation below, since a
@@ -1067,21 +1212,21 @@ class AudioPlayer:
                 t_end = 1.0 - (self.declick_remaining - ramp_n) / self.declick_total
                 t = np.linspace(t_start, t_end, ramp_n, endpoint=False)
                 gains = (1.0 - np.cos(t * np.pi / 2)).astype(np.float32).reshape(-1, 1)
-                outdata[:ramp_n] *= gains
+                outdata[write_offset:write_offset + ramp_n] *= gains
                 self.declick_remaining -= ramp_n
             self.cursor += n
-            if n < frames:
+            if n < frames_left:
                 if self.play_loop:
                     self.cursor = self.play_start
-                    n2 = min(frames - n, self.play_end - self.play_start)
+                    n2 = min(frames_left - n, self.play_end - self.play_start)
                     chunk2 = self.data[self.play_start:self.play_start + n2]
                     if chunk2.shape[1] != ch:
                         chunk2 = np.tile(chunk2[:, :1], (1, ch)) if chunk2.shape[1] == 1 else chunk2[:, :ch]
-                    outdata[n:n + n2] = chunk2
-                    outdata[n + n2:] = 0
+                    outdata[write_offset + n:write_offset + n + n2] = chunk2
+                    outdata[write_offset + n + n2:] = 0
                     self.cursor += n2
                 else:
-                    outdata[n:] = 0
+                    outdata[write_offset + n:] = 0
                     self.playing = False
                     raise _sd.CallbackStop
 
@@ -1096,6 +1241,8 @@ class AudioPlayer:
             # auditioning stops/reloads/replays, which is its own kind of
             # jump and had the same audible-pop problem)
             self.declick_remaining = self.declick_total
+            self.pending_cursor = None  # defensive: no stale jump from a previous session
+            self.fadeout_remaining = 0
         channels = self.data.shape[1]
         # latency='low' matters here specifically: without it, PortAudio's
         # default latency setting can leave several buffers' worth of audio
@@ -1171,6 +1318,8 @@ class AudioPlayer:
             self.stream = None
         with self.lock:
             self.cursor = self.sel_start
+            self.pending_cursor = None
+            self.fadeout_remaining = 0
         self.playing = False
 
     def rewind(self):
@@ -1864,6 +2013,52 @@ def render_rounded_box_image(w, h, radius, fill_hex, border_hex, supersample=4):
                             fill=_hex_to_rgb(fill_hex) + (255,),
                             outline=_hex_to_rgb(border_hex) + (255,), width=max(1, supersample))
     return img.resize((w, h), Image.LANCZOS)
+
+
+def render_rounded_box_with_tail_image(w, h, radius, fill_hex, border_hex, tail_x,
+                                        tail_w=16, tail_h=8, supersample=4):
+    """Same rounded box as render_rounded_box_image, plus a small upward-
+    pointing triangular tail baked into the TOP edge at horizontal
+    position tail_x -- a speech-bubble/callout shape, used to visually
+    connect the XFADE CURVE/OVERLAP/LOOP ALIGNMENT group to the LOOP
+    button above it: the tail points at what the box is commentary on.
+
+    `h` is the MAIN BOX's own height; the returned image is h+tail_h
+    tall overall, with the main box occupying the bottom h pixels and
+    the tail occupying the top tail_h-pixel strip.
+
+    Draw order matters here: the main rect (with its full border,
+    including the top edge) is drawn first, then the tail's FILL is
+    drawn on top -- deliberately covering the portion of the box's own
+    top border line that falls within the tail's base -- and only then
+    are the tail's two slanted SIDE edges drawn with the border color
+    (not its base). That's what makes the final outline read as one
+    continuous path (box top edge -> up one tail side -> point -> down
+    the other tail side -> back to box top edge) rather than a separate
+    triangle glued on top with a stray line across its own base."""
+    w, h = max(1, int(w)), max(1, int(h))
+    tail_h = max(0, int(tail_h))
+    total_h = h + tail_h
+    sw, sh = w * supersample, total_h * supersample
+    img = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    box_top = tail_h * supersample
+    fill_rgba = _hex_to_rgb(fill_hex) + (255,)
+    border_rgba = _hex_to_rgb(border_hex) + (255,)
+    border_w = max(1, supersample)
+
+    draw.rounded_rectangle([0, box_top, sw - 1, sh - 1], radius=radius * supersample,
+                            fill=fill_rgba, outline=border_rgba, width=border_w)
+
+    if tail_h > 0:
+        tx = tail_x * supersample
+        tw = tail_w * supersample
+        draw.polygon([(tx - tw / 2, box_top + border_w), (tx + tw / 2, box_top + border_w), (tx, 0)],
+                     fill=fill_rgba)
+        draw.line([(tx - tw / 2, box_top), (tx, 0)], fill=border_rgba, width=border_w)
+        draw.line([(tx, 0), (tx + tw / 2, box_top)], fill=border_rgba, width=border_w)
+
+    return img.resize((w, total_h), Image.LANCZOS)
 
 
 def render_dropdown_bg_image(w, h, radius, fill_hex, border_hex, caret_hex, supersample=4):
@@ -2717,13 +2912,25 @@ class LoopCrossfadeGUI:
         # boxes multiple times, the geometry()/minsize() calls, the
         # temporary worst-case status text swap for height measurement)
         # all happened live, in full view, one after another -- read as
-        # rapid, jittery window flashing/resizing at startup, reported
-        # as worse on Windows specifically (plausibly because Windows'
-        # own compositing is less forgiving of rapid successive redraws
-        # than macOS's tends to be, though the ROOT cause -- doing all
-        # this setup work with the window already visible -- was never
-        # actually platform-specific).
-        self.root.withdraw()
+        # rapid, jittery window flashing/resizing at startup on Windows.
+        #
+        # WINDOWS ONLY, deliberately: on macOS this same withdraw/
+        # deiconify sequence coincided with a NEW, worse symptom -- the
+        # whole Desktop visibly blanking out and restoring at launch.
+        # That's consistent with macOS's window server handling a
+        # withdrawn-then-deiconified window differently than Windows
+        # does (plausibly some form of Space/compositor transition
+        # tied to how and when a window first becomes visible), though
+        # this is the best available explanation rather than a directly
+        # confirmed root cause -- Tk's macOS behavior in this area isn't
+        # thoroughly documented, and this can't be tested without a real
+        # Mac. Given that, the safer choice is keeping the confirmed
+        # Windows fix while reverting macOS to its known-good prior
+        # behavior (window visible from creation), rather than keeping
+        # a fix for one platform's cosmetic issue at the cost of a
+        # worse one on another.
+        if not IS_MACOS:
+            self.root.withdraw()
         self.root.title("FermaLoop")
         self.root.configure(bg=BG)
         # Sets the RUNNING window's own icon -- separate from and in
@@ -2827,13 +3034,14 @@ class LoopCrossfadeGUI:
 
         self._apply_saved_or_natural_size()
         _log_startup("_apply_saved_or_natural_size() done -- launch sequence complete")
-        # NOW show the window, for the first time -- everything above
-        # this point (all widget construction, box-layout measurement/
-        # repacking, geometry/minsize, the worst-case status-height
-        # measurement) has happened invisibly while withdrawn, so what
-        # actually appears on screen is the final, already-settled
-        # window in one shot, not a rapid sequence of intermediate ones.
-        self.root.deiconify()
+        # NOW show the window, for the first time (Windows only -- see
+        # the matching withdraw() note above for why macOS never hides
+        # it in the first place). Everything above this point has
+        # happened invisibly while withdrawn, so what actually appears
+        # on screen is the final, already-settled window in one shot,
+        # not a rapid sequence of intermediate ones.
+        if not IS_MACOS:
+            self.root.deiconify()
         _log_startup("window shown (deiconify)")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -2964,34 +3172,6 @@ class LoopCrossfadeGUI:
         rc["current_height"] = new_height
         rc["canvas"].configure(height=new_height)
         rc["redraw"]()
-
-    def _update_box_layout(self):
-        """Switches the CURVE/XFADE/LOOP row between side-by-side (when
-        there's room for all three at their natural width) and stacked
-        (each full-width, one above the other) when there isn't -- this
-        is what lets the window's true minimum width be as small as a
-        SINGLE box's natural width, rather than needing to fit all three
-        side by side at once. Only re-packs when the mode actually
-        changes, not on every resize event."""
-        available = self._cols_row.winfo_width()
-        if available < 10:
-            available = self.root.winfo_width() or self._side_by_side_min_width
-        mode = "side_by_side" if available >= self._side_by_side_min_width else "stacked"
-        if mode == self._box_layout_mode:
-            return
-        self._box_layout_mode = mode
-
-        for box_outer, _ in self._box_pairs:
-            box_outer.pack_forget()
-
-        if mode == "side_by_side":
-            for (box_outer, _), pad in zip(self._box_pairs, self._box_side_by_side_paddings):
-                box_outer.pack(side="left", fill="both", expand=True, padx=pad)
-                self._set_box_height(box_outer, self._boxes_shared_height)
-        else:
-            for box_outer, _ in self._box_pairs:
-                box_outer.pack(fill="x", pady=(0, 6))
-                self._set_box_height(box_outer, box_outer._rc["natural_h"])
 
     def _on_auto_detect_clicked(self):
         self.auto_xfade_var.set(True)
@@ -3331,7 +3511,80 @@ class LoopCrossfadeGUI:
         # since it's likely the least-used of the three. Each is its own
         # small rounded box with a header, rather than one shared
         # container trying to hold four different decisions at once. ----
-        cols_row = ttk.Frame(outer); cols_row.pack(fill="x", pady=(14, 8))
+        #
+        # All three are wrapped in an outer group container -- a subtle
+        # border around the trio with a small tail pointing up at the
+        # LOOP button, a speech-bubble/callout shape that visually ties
+        # these settings specifically to LOOP (they affect it, and only
+        # it -- REPEAT and raw playback ignore them entirely). This is
+        # PURE STATIC RENDERING added directly into the existing main
+        # window -- no new Toplevel, no popup, no focus/grab handling of
+        # any kind -- which is deliberately what keeps this low-risk
+        # across platforms: it sidesteps the entire class of macOS-
+        # specific window-server issues (the Format dropdown, the
+        # PaulXStretch focus bug) that came from a SEPARATE window being
+        # involved. This is just one more rounded box drawn the same way
+        # every other one in this app already is, at one more level of
+        # nesting.
+        GROUP_TAIL_H = 9
+        GROUP_MARGIN = 10  # inset between the outer border and the boxes it wraps
+        loop_group_canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        loop_group_canvas.pack(fill="x", pady=(14, 8))
+        cols_row = ttk.Frame(loop_group_canvas)
+        cols_row_window = loop_group_canvas.create_window(
+            GROUP_MARGIN, GROUP_TAIL_H + GROUP_MARGIN, anchor="nw", window=cols_row)
+
+        def _redraw_loop_group(event=None):
+            # unlike pack(fill="x"), a canvas create_window doesn't
+            # automatically stretch its embedded widget -- its width has
+            # to be set explicitly on every resize for cols_row (and via
+            # it, the three boxes' own fill=both/expand=True packing) to
+            # actually track the available space, rather than staying
+            # frozen at whatever width it happened to have when created.
+            canvas_w = loop_group_canvas.winfo_width()
+            if canvas_w < 10:
+                return  # not yet realized; the initial call right after bind() below covers this
+            content_w = max(1, canvas_w - GROUP_MARGIN * 2)
+            loop_group_canvas.itemconfigure(cols_row_window, width=content_w)
+            # height must be measured AFTER the width change above is
+            # actually applied, not before -- otherwise this reads
+            # whatever height cols_row happened to have at its PREVIOUS
+            # width, which is exactly the class of stale-measurement bug
+            # already hit more than once elsewhere in this file.
+            loop_group_canvas.update_idletasks()
+            content_h = cols_row.winfo_reqheight()
+            box_h = content_h + GROUP_MARGIN * 2
+
+            # Tail x-position: LOOP's own horizontal center, translated
+            # into this canvas's coordinate space via a root-coordinate
+            # difference -- the same proven technique already used for
+            # the Format dropdown's positioning, rather than anything
+            # relying on pack/grid-relative offsets that can drift once
+            # multiple independently-centered containers are involved.
+            tail_x = (self.btn_loop.winfo_rootx() - loop_group_canvas.winfo_rootx()
+                      + self.btn_loop.winfo_width() / 2)
+            tail_x = max(GROUP_MARGIN + 10, min(canvas_w - GROUP_MARGIN - 10, tail_x))
+
+            img = render_rounded_box_with_tail_image(
+                canvas_w, box_h, radius=10, fill_hex=PANEL, border_hex=BORDER,
+                tail_x=tail_x, tail_w=16, tail_h=GROUP_TAIL_H,
+            )
+            photo = ImageTk.PhotoImage(img)
+            loop_group_canvas._bg_photo = photo  # keep a reference or Tk garbage-collects it
+            loop_group_canvas.delete("bg")
+            loop_group_canvas.create_image(0, 0, anchor="nw", image=photo, tags="bg")
+            loop_group_canvas.tag_lower("bg")  # keep it behind the actual content
+            loop_group_canvas.configure(height=box_h + GROUP_TAIL_H)
+            loop_group_canvas.coords(cols_row_window, GROUP_MARGIN, GROUP_TAIL_H + GROUP_MARGIN)
+
+        loop_group_canvas.bind("<Configure>", _redraw_loop_group)
+        _redraw_loop_group()  # harmless no-op now (canvas isn't sized yet),
+                               # but matches the belt-and-suspenders pattern
+                               # every other responsive box in this app uses
+        self._loop_group_canvas = loop_group_canvas
+        self._loop_group_cols_row = cols_row
+        self._redraw_loop_group = _redraw_loop_group
+        self._loop_group_margin, self._loop_group_tail_h = GROUP_MARGIN, GROUP_TAIL_H
 
         def _section_header(parent, title):
             label = ttk.Label(parent, text=title, background=PANEL, foreground=FG,
@@ -3398,15 +3651,11 @@ class LoopCrossfadeGUI:
             tip = ToolTip(widget)
             tip.set_section("LOOP ALIGNMENT", loop_section_desc, loop_section_bullets)
 
-        # All three "finalize" once here (creates each box's content
-        # window + background, binds its own resize handling) -- actual
-        # packing/height is then handled by _update_box_layout below,
-        # which switches between side-by-side and stacked depending on
-        # how much width is actually available.
+        # Each "finalize" call creates the box's own content window +
+        # background and binds its own resize handling.
         self._box_pairs = [(curve_outer, curve_inner), (xfade_outer, xfade_inner), (loop_outer, loop_inner)]
         self._box_side_by_side_paddings = [(0, 8), (8, 8), (8, 0)]
         self._cols_row = cols_row
-        self._box_layout_mode = None  # forces the first _update_box_layout call to actually apply
 
         natural_widths = []
         natural_heights = []
@@ -3415,23 +3664,25 @@ class LoopCrossfadeGUI:
             natural_widths.append(nw)
             natural_heights.append(nh)
         self._boxes_shared_height = max(natural_heights)
-        # true minimum width needed side-by-side (all three plus gaps) vs.
-        # stacked (just the single widest box) -- used by _update_box_layout
-        # to decide which mode fits, and by _apply_saved_or_natural_size to
-        # set a genuinely small window minsize now that stacking exists
-        self._side_by_side_min_width = sum(natural_widths) + 16  # +padx gaps between boxes
-        self._stacked_min_width = max(natural_widths)
 
-        # NOT calling _update_box_layout() here: at this point in
-        # startup the window hasn't been sized/positioned yet (that's
-        # _apply_saved_or_natural_size's job, called shortly after), so
-        # whatever layout decision this would make now is immediately
-        # thrown away and redone from scratch once the window's real
-        # size is known -- a redundant pack+render pass on each box for
-        # a state nobody ever sees. Just bind for FUTURE resize events;
-        # the actual first layout pass happens once, correctly, in
-        # _apply_saved_or_natural_size.
-        cols_row.bind("<Configure>", lambda e: self._update_box_layout())
+        # Packed side-by-side once, directly -- there used to be a
+        # separate stacked (vertical) arrangement the window could fall
+        # back to below a width threshold, switched between at runtime.
+        # It's removed: the width floor actually enforced by minsize()
+        # (see below) was, in practice, already wider than the threshold
+        # that would ever trigger stacking -- most likely because a bare
+        # tk.Canvas without an explicit width (the waveform canvas, in
+        # this case) reports whatever it was last actually rendered at
+        # for winfo_reqwidth() rather than any real natural-content size,
+        # the same quirk already worked around for these box canvases
+        # specifically below. That made the stacked mode unreachable by
+        # dragging the window narrower in practice, and, separately, not
+        # of much value even if it had been reachable -- the waveform
+        # itself would already be too narrow to be useful well before a
+        # width where stacking these three boxes would matter.
+        for (box_outer, _), pad in zip(self._box_pairs, self._box_side_by_side_paddings):
+            box_outer.pack(side="left", fill="both", expand=True, padx=pad)
+            self._set_box_height(box_outer, self._boxes_shared_height)
 
         btn_process = ttk.Button(outer, text="Process & Save", style="Accent.TButton",
                    command=self.run_process, takefocus=0)
@@ -4253,7 +4504,7 @@ class LoopCrossfadeGUI:
             # happens WHILE actively playing, e.g. clicking outside the
             # loop region to check surrounding context mid-audition
             self.player.swap_playing_buffer(self.data, self.sr)
-            self.player.set_loop(self.repeat_var.get())
+            self.player.set_loop(self.repeat_var.get(), declick_wrap=True)
         else:
             self.player.stop()
             self.player.load(self.data, self.sr)
@@ -4294,7 +4545,7 @@ class LoopCrossfadeGUI:
                 # reuse the player's own (already-correct) internal bounds,
                 # not overwrite them with raw file-space selection indices
                 self.player.set_selection(self.sel_start, self.sel_end)
-                self.player.set_loop(self.repeat_var.get())
+                self.player.set_loop(self.repeat_var.get(), declick_wrap=True)
             self.player.play()
             self._set_play_pause_icon(True)
 
@@ -4310,7 +4561,7 @@ class LoopCrossfadeGUI:
 
     def on_repeat_toggle(self):
         self.repeat_var.set(not self.repeat_var.get())
-        self.player.set_loop(self.repeat_var.get())
+        self.player.set_loop(self.repeat_var.get(), declick_wrap=True)
         self._refresh_repeat_icon()
 
     def _read_process_params(self, silent=False):
@@ -4423,7 +4674,7 @@ class LoopCrossfadeGUI:
             else:
                 self.player.stop()
                 self.player.load(preview, self.sr)
-                self.player.set_loop(True)
+                self.player.set_loop(True, declick_wrap=False)
                 self.player.play()
             self.preview_mode = True
             self._refresh_loop_and_repeat_icons()
@@ -4955,18 +5206,36 @@ class LoopCrossfadeGUI:
             # buffer -- Crop is optional; this is what makes "process and
             # save straight from a selection" work without cropping first
             segment = self.data[self.sel_start:self.sel_end]
-            result, used_xfade, start_trim, end_trim = _run_pipeline(
-                segment, self.sr, xfade_seconds, curve, snap, window, self.auto_xfade_var.get(),
-            )
+
+            # Export mode follows whichever preview button is currently
+            # engaged -- "what you hear is what you get", no separate mode
+            # selector needed. LOOP (preview_mode) wins if somehow both
+            # ended up set, since it represents the more deliberate,
+            # user-tuned choice.
+            if self.preview_mode:
+                result, used_xfade, start_trim, end_trim = _run_pipeline(
+                    segment, self.sr, xfade_seconds, curve, snap, window, self.auto_xfade_var.get(),
+                )
+                mode_label = "Crossfaded"
+            elif self.repeat_var.get():
+                result = declick_edges(segment, self.sr)
+                used_xfade, start_trim, end_trim = 0.0, 0, 0
+                mode_label = "Declicked"
+            else:
+                result = segment
+                used_xfade, start_trim, end_trim = 0.0, 0, 0
+                mode_label = "Unprocessed"
+
             encode_from_pcm(result, self.sr, self.sampwidth, out_path,
                              mp3_quality=int(round(self.mp3_quality_var.get())))
             elapsed = time.time() - t0
             duration = result.shape[0] / self.sr
-            msg = (f"Done in {elapsed:.2f}s -- {duration:.2f}s loop saved to:\n{out_path}\n"
-                   f"Crossfade used: {used_xfade * 1000:.0f} ms")
-            if snap:
-                msg += (f"\nTrimmed to transients: {start_trim / self.sr * 1000:.0f} ms from start, "
-                        f"{end_trim / self.sr * 1000:.0f} ms from end")
+            msg = f"Done in {elapsed:.2f}s -- {duration:.2f}s ({mode_label}) saved to:\n{out_path}"
+            if mode_label == "Crossfaded":
+                msg += f"\nCrossfade used: {used_xfade * 1000:.0f} ms"
+                if snap:
+                    msg += (f"\nTrimmed to transients: {start_trim / self.sr * 1000:.0f} ms from start, "
+                            f"{end_trim / self.sr * 1000:.0f} ms from end")
             self.status_var.set(msg)
         except Exception as e:
             self.status_var.set("Failed. See error dialog.")
@@ -4982,54 +5251,38 @@ class LoopCrossfadeGUI:
         self.root.update_idletasks()
         _log_startup("_apply_saved_or_natural_size: after initial update_idletasks()")
 
-        # Measure the STACKED-mode size first (CURVE/XFADE/LOOP stacked
-        # vertically) -- this becomes BOTH the default "narrowest
-        # natural" window size on first launch AND the true minimum
-        # width floor, computed together in one pass. A stacked box only
-        # ever needs to fit itself, not compete with two others for
-        # space side by side, so this is naturally much narrower than
-        # the side-by-side layout.
-        #
-        # Each canvas's <Configure> binding triggers a full supersampled
-        # PIL render on every resize -- correct for actual on-screen
-        # resizing, but this measurement pass alone involves several
-        # pack/repack cycles that don't need to be seen, only measured.
-        # Left bound, this was rendering each box 4-5+ times before
-        # settling (reported as a multi-second blank delay for these
-        # three boxes at launch). Temporarily unbinding for the
-        # measurement-only portion and restoring it right before the one
-        # real, visible layout pass cuts that down to a single render
-        # per box.
-        for box_outer, _ in self._box_pairs:
-            box_outer._rc["canvas"].unbind("<Configure>")
+        # The loop-group canvas (wraps XFADE CURVE/OVERLAP/LOOP ALIGNMENT
+        # with the border+tail) is a bare tk.Canvas with no explicit
+        # width/height -- the same "reports whatever it was last actually
+        # rendered at, not real content size" issue already worked around
+        # for the individual box canvases. Force it to an accurate size
+        # here, BEFORE the whole-window measurement below, or the
+        # window's natural width/height would be computed from this
+        # canvas's arbitrary Tk default rather than what it actually
+        # needs. cols_row itself is still at its own natural,
+        # unconstrained width at this point (the earlier no-op call to
+        # _redraw_loop_group returned before ever constraining it), so
+        # its own winfo_reqwidth() correctly reflects the sum of all
+        # three boxes' natural widths.
+        self._loop_group_cols_row.update_idletasks()
+        _group_content_w = self._loop_group_cols_row.winfo_reqwidth()
+        _group_content_h = self._loop_group_cols_row.winfo_reqheight()
+        _margin, _tail_h = self._loop_group_margin, self._loop_group_tail_h
+        self._loop_group_canvas.configure(
+            width=_group_content_w + _margin * 2,
+            height=_group_content_h + _margin * 2 + _tail_h,
+        )
 
-        self._box_layout_mode = None
-        for box_outer, _ in self._box_pairs:
-            box_outer.pack_forget()
-        for box_outer, _ in self._box_pairs:
-            box_outer.pack(fill="x", pady=(0, 6))
-            # NOT using _set_box_height here: it calls redraw() directly,
-            # completely bypassing the <Configure> unbind above -- this
-            # was the actual reason the previous round of this fix only
-            # cut the render count partially instead of eliminating the
-            # redundant ones. This measurement pass only needs the
-            # dimensions actually configured for accurate
-            # winfo_reqwidth()/reqheight() readings, not a rendered
-            # result of an intermediate state nobody will ever see.
-            box_outer._rc["current_height"] = box_outer._rc["natural_h"]
-            box_outer._rc["canvas"].configure(height=box_outer._rc["natural_h"])
-            # a bare tk.Canvas without an explicit -width doesn't compute
-            # winfo_reqwidth() from its content -- it just reports
-            # whatever its last actual rendered size happened to be.
-            # Explicitly setting it here forces an accurate reading of
-            # the box's real natural content width for this measurement.
-            box_outer._rc["canvas"].configure(width=box_outer._rc["natural_w"])
-        _log_startup("_apply_saved_or_natural_size: after measurement-phase pack/configure loop (no renders should have fired)")
-        self._box_layout_mode = "stacked"
-        self.root.update()  # full update -- reqwidth needs a real event
-                             # pass to settle and reflect this pack change
+        # Measure the box row's natural size -- it's already packed
+        # side-by-side (the only mode that exists now; see the setup
+        # code where the boxes are packed, for why the stacked
+        # alternative was removed) as part of normal widget construction,
+        # so this is a direct, single measurement, not a temporary
+        # re-pack-to-measure-then-re-pack-again dance.
+        self.root.update()  # full update -- reqwidth needs a real event pass to settle
         _log_startup("_apply_saved_or_natural_size: after self.root.update() (forced full event processing)")
-        stacked_w = self.root.winfo_reqwidth()
+        content_w = self.root.winfo_reqwidth()
+        natural_h = self.root.winfo_reqheight()  # baseline BEFORE swapping in worst-case text
 
         # Temporarily substitute a realistic WORST-CASE status message
         # before measuring height, then restore the real one right after.
@@ -5054,12 +5307,26 @@ class LoopCrossfadeGUI:
         _real_status = self.status_var.get()
         self.status_var.set(_worst_case_status)
         self.root.update_idletasks()
-        stacked_h = self.root.winfo_reqheight()
+        worst_case_h = self.root.winfo_reqheight()
         self.status_var.set(_real_status)
         self.root.update_idletasks()
 
+        # Cap how much EXTRA height the worst-case measurement is allowed
+        # to add over the natural baseline, rather than trusting it
+        # unconditionally. The same worst-case string's wrapped line
+        # count isn't reliably consistent across platforms/fonts --
+        # "Segoe UI" (Windows) and whatever Tk substitutes for it on
+        # macOS can wrap the same text to meaningfully different numbers
+        # of lines. Uncapped, this measurement added a modest, reasonable
+        # amount of extra height on macOS but ballooned the window to a
+        # genuinely huge size on Windows for the exact same source
+        # string. A fixed cap keeps this a sensible safety margin
+        # everywhere instead of an unpredictable one.
+        MAX_EXTRA_STATUS_HEIGHT = 80
+        content_h = min(worst_case_h, natural_h + MAX_EXTRA_STATUS_HEIGHT)
+
         saved = self.window_sizes.get("main")
-        w, h = resolve_window_size(stacked_w, stacked_h, saved)
+        w, h = resolve_window_size(content_w, content_h, saved)
         if saved and "x" in saved and "y" in saved:
             try:
                 x, y = int(saved["x"]), int(saved["y"])
@@ -5069,16 +5336,8 @@ class LoopCrossfadeGUI:
         else:
             self.root.geometry(f"{w}x{h}")
         _log_startup("_apply_saved_or_natural_size: after applying final geometry()")
-
-        # restore each canvas's real <Configure> binding NOW, right
-        # before the one layout pass that actually needs to be seen
-        for box_outer, _ in self._box_pairs:
-            box_outer._rc["canvas"].bind("<Configure>", box_outer._rc["redraw"])
-
-        self._box_layout_mode = None  # forces _update_box_layout to re-evaluate for the actual applied size
-        self._update_box_layout()
-        self.root.minsize(stacked_w, stacked_h)
-        _log_startup("_apply_saved_or_natural_size: after final _update_box_layout() -- the one real, visible render pass")
+        self.root.minsize(content_w, content_h)
+        _log_startup("_apply_saved_or_natural_size: done")
 
     def _on_close(self):
         try:
