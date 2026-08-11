@@ -5376,31 +5376,37 @@ class LoopCrossfadeGUI:
         # comfortable group margin/padding), just not past the point
         # where the boxes themselves would break.
         #
-        # Computed as a DELTA against content_w rather than compared
-        # directly against it: the loop-group canvas goes through its
-        # own multi-stage <Configure> cascade (explicit pre-size above,
-        # then whatever _redraw_loop_group's own itemconfigure calls
-        # trigger) before content_w is read, and an earlier version of
-        # this that clamped directly with min(content_w, ...) produced a
-        # floor far too small in practice -- a live-tested regression
-        # (reported: dragging the window narrow enough to squash the
-        # Browse button down to a single letter), consistent with
-        # content_w having been read before that cascade had fully
-        # settled. Using content_w only for the "everything else in the
-        # window" delta -- chrome that ISN'T subject to that same
-        # empty-then-populated timing issue -- avoids depending on the
-        # same measurement that just proved unreliable for the group's
-        # own portion of the width.
+        # Direct measurement, NOT a delta against content_w -- an
+        # earlier version of this computed other_chrome_w = content_w -
+        # group_natural_total, then min_w = group_natural_total +
+        # other_chrome_w, which is algebraically just content_w again
+        # (the group_natural_total terms cancel out entirely). That
+        # bug was invisible from reading the code casually -- it only
+        # showed up as a live-tested regression (confirmed via the
+        # diagnostic log below: min_w came out EXACTLY equal to
+        # content_w, meaning minsize was never actually reduced at
+        # all). Separately, the underlying assumption that "everything
+        # else" could be found by subtracting the group's width from
+        # the window's width was itself wrong: this window stacks rows
+        # VERTICALLY, so its overall width is the MAXIMUM of each row's
+        # own width, not their sum -- subtracting one row from that
+        # maximum doesn't isolate anything meaningful about the
+        # others. The boxes group is the widest single row in this
+        # window by a wide margin (confirmed in the same log: ~500px
+        # vs. an estimated ~300px for the six-icon transport row), so
+        # its own natural width, plus the outer content frame's own
+        # padding (the one piece of chrome outside the group that
+        # actually does add to the total), IS the true minimum.
         _boxes_natural_sum = sum(box_outer._rc["natural_w"] for box_outer, _ in self._box_pairs)
         _inter_box_padding = sum(sum(pad) for pad in self._box_side_by_side_paddings)
         _group_natural_total = _boxes_natural_sum + _inter_box_padding + self._loop_group_margin * 2
-        _other_chrome_w = max(0, content_w - _group_natural_total)
-        min_w = _group_natural_total + _other_chrome_w
+        _outer_padding = 16 * 2  # matches outer = ttk.Frame(self.root, padding=16)
+        min_w = _group_natural_total + _outer_padding
         _log_startup(f"_apply_saved_or_natural_size: minsize width check -- "
                      f"content_w={content_w}, boxes_natural_sum={_boxes_natural_sum}, "
                      f"inter_box_padding={_inter_box_padding}, "
                      f"group_natural_total={_group_natural_total}, "
-                     f"other_chrome_w={_other_chrome_w}, min_w={min_w}")
+                     f"outer_padding={_outer_padding}, min_w={min_w}")
         self.root.minsize(min_w, content_h)  # height floor UNCHANGED -- it protects the
                                               # worst-case status message from getting
                                               # clipped again if manually shrunk; only
