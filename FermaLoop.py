@@ -3527,9 +3527,9 @@ class LoopCrossfadeGUI:
         # every other one in this app already is, at one more level of
         # nesting.
         GROUP_TAIL_H = 9
-        GROUP_MARGIN = 10  # inset between the outer border and the boxes it wraps
+        GROUP_MARGIN = 8  # inset between the outer border and the boxes it wraps
         loop_group_canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
-        loop_group_canvas.pack(fill="x", pady=(14, 8))
+        loop_group_canvas.pack(fill="x", pady=(4, 8))
         cols_row = ttk.Frame(loop_group_canvas)
         cols_row_window = loop_group_canvas.create_window(
             GROUP_MARGIN, GROUP_TAIL_H + GROUP_MARGIN, anchor="nw", window=cols_row)
@@ -5336,7 +5336,28 @@ class LoopCrossfadeGUI:
         else:
             self.root.geometry(f"{w}x{h}")
         _log_startup("_apply_saved_or_natural_size: after applying final geometry()")
-        self.root.minsize(content_w, content_h)
+        # minsize() gets its OWN, genuinely smaller floor than the
+        # comfortable default geometry above -- using content_w/content_h
+        # directly here locked the window's MINIMUM size to equal its
+        # DEFAULT size, making it impossible to narrow at all (reported
+        # directly: dragging either edge did nothing). The three boxes
+        # already handle being given less width gracefully via their own
+        # fill=both/expand=True packing inside cols_row, whose width gets
+        # explicitly reset on every resize in _redraw_loop_group -- that
+        # flexibility already exists and already works for ordinary
+        # resize events, it just never got the chance to engage below
+        # the "natural" size specifically because minsize was blocking
+        # the window from ever reaching it. The floor here is the widest
+        # SINGLE box's own comfortable width (so at least one box always
+        # has room to render normally) plus a fixed allowance for the
+        # other two at a visibly compressed, but not unusably tiny,
+        # width -- clamped so it's never wider than the default itself.
+        _widest_box_w = max(box_outer._rc["natural_w"] for box_outer, _ in self._box_pairs)
+        min_w = min(content_w, _widest_box_w + self._loop_group_margin * 2 + 220)
+        self.root.minsize(min_w, content_h)  # height floor UNCHANGED -- it protects the
+                                              # worst-case status message from getting
+                                              # clipped again if manually shrunk; only
+                                              # width needed loosening here
         _log_startup("_apply_saved_or_natural_size: done")
 
     def _on_close(self):
