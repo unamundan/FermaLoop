@@ -467,15 +467,45 @@ def _crossfade_core(data, xfade_n, curve):
     return np.concatenate([blended, middle], axis=0)
 
 
-def declick_edges(data, samplerate, fade_seconds=0.05):
+# Shared between declick_edges' own default below and AudioPlayer's
+# wrap_declick_total (see load()) -- both exist to declick the SAME
+# thing (a REPEAT loop's wrap point), just in two different contexts:
+# this one bakes the fade into an EXPORTED file, the other applies it
+# live during on-screen playback. They drifted apart once already: this
+# was 0.05 (matching an earlier, since-changed live value) even after
+# the live path moved to a shorter duration specifically because a
+# fade audible once per loop cycle needs to be much shorter than one
+# that only ever fires from a one-time seek -- confirmed directly, by
+# measuring an exported file's actual fade length against a report of
+# an "undesirably long" fade when looped externally. A single shared
+# constant means the next change to either can't silently leave the
+# other stale the same way.
+#
+# 0.005 (5ms) here, not 0.01 -- this is a TEST value specifically, to
+# compare against the previous 10ms before deciding whether REPEAT
+# stays in the app at all. Unlike LOOP's crossfade (which blends two
+# overlapping copies of the audio, so total energy stays roughly
+# constant through the overlap and there's no structural dip), this
+# function fades to actual silence at both edges with nothing filling
+# the gap -- shortening this reduces the DURATION of that dip but can't
+# eliminate it, since eliminating it isn't what this function does.
+# 5ms is close to the lower bound literature suggests before a
+# fade/crossfade window measurably loses effectiveness at suppressing
+# clicks -- shorter than this trades away real safety margin, not just
+# "sounds different."
+LOOP_WRAP_DECLICK_SECONDS = 0.005
+
+
+def declick_edges(data, samplerate, fade_seconds=LOOP_WRAP_DECLICK_SECONDS):
     """Applies a short raised-cosine fade-IN at the very start and fade-OUT
     at the very end of `data`, WITHOUT shortening it or blending head into
     tail the way loop_crossfade() does -- this is REPEAT mode's export
     counterpart: same automatic, non-user-adjustable edge treatment as the
     live wrap declick in AudioPlayer._callback (same curve shape, same
-    default duration), just baked into the file instead of applied live
-    during playback, so what Repeat previews and what it exports sound
-    the same way at the loop point when the file is looped externally.
+    LOOP_WRAP_DECLICK_SECONDS duration), just baked into the file instead
+    of applied live during playback, so what Repeat previews and what it
+    exports sound the same way at the loop point when the file is looped
+    externally.
 
     Deliberately the SAME curve as the live declick (1-cos(t*pi/2) for the
     fade-in, cos(t*pi/2) for the fade-out) rather than loop_crossfade's
@@ -1027,15 +1057,19 @@ class AudioPlayer:
         self.data = np.ascontiguousarray(data.astype(np.float32))
         self.sr = sr
         self.declick_total = max(1, int(sr * 0.05))  # 50ms fade, applied after an explicit seek
-        self.wrap_declick_total = max(1, int(sr * 0.01))  # 10ms fade, applied at a REPEAT loop
-                                                            # wrap specifically -- short enough
+        self.wrap_declick_total = max(1, int(sr * LOOP_WRAP_DECLICK_SECONDS))  # applied at a REPEAT
+                                                            # loop wrap specifically -- short enough
                                                             # to still fully mask the underlying
                                                             # discontinuity (the original problem
                                                             # was a genuine waveform discontinuity,
                                                             # not a need for any particular fade
-                                                            # length) while being ~5x shorter than
+                                                            # length) while being much shorter than
                                                             # the seek fade, since this one repeats
-                                                            # every loop cycle rather than firing once
+                                                            # every loop cycle rather than firing once.
+                                                            # Shared with declick_edges' own default
+                                                            # above (see LOOP_WRAP_DECLICK_SECONDS)
+                                                            # so the live and exported-file versions
+                                                            # of this same declick can't drift apart
         with self.lock:
             self.sel_start, self.sel_end, self.cursor = 0, len(self.data), 0
             self.play_start, self.play_end = 0, len(self.data)
@@ -3088,6 +3122,21 @@ class LoopCrossfadeGUI:
 
         self.in_path_var = tk.StringVar()
         self.out_path_var = tk.StringVar()
+        self._save_as_root = None          # loaded file's path minus extension AND
+                                            # mode suffix -- None until a file is loaded
+        self._save_as_ext = ""             # current output extension, kept in sync by
+                                            # _on_format_changed as well as load()
+        self._save_as_current_suffix = ""  # the suffix _update_save_as_suffix last
+                                            # actually wrote, for comparison below
+        self._save_as_user_customized = False  # latches True the moment the user's
+                                                # own edit diverges from the above --
+                                                # never auto-updated again until a new
+                                                # file loads and resets it
+        self._save_as_programmatic_update = False  # suppresses the trace below from
+                                                     # mistaking THIS class's own writes
+                                                     # (mode suffix or format/extension
+                                                     # changes) for a user edit
+        self.out_path_var.trace_add("write", self._on_out_path_changed)
         self.format_var = tk.StringVar(value="FLAC (Lossless)")
         self.mp3_quality_var = tk.DoubleVar(value=2)
         self.mp3_quality_label_var = tk.StringVar(value="")
@@ -3098,7 +3147,8 @@ class LoopCrossfadeGUI:
         self.snap_var = tk.BooleanVar(value=False)
         self.window_var = tk.StringVar(value="0.25")
         self.repeat_var = tk.BooleanVar(value=False)
-        self.repeat_var.trace_add("write", lambda *a: self._refresh_process_button_label())
+        self.repeat_var.trace_add("write", lambda *a: (self._refresh_process_button_label(),
+                                                          self._update_save_as_suffix()))
         self.status_var = tk.StringVar(value="")
         self.time_var = tk.StringVar(value="00:00:00.000")
         self.selection_duration_var = tk.StringVar(value="Selection: --")
@@ -3887,7 +3937,19 @@ class LoopCrossfadeGUI:
         current = self.out_path_var.get()
         if current:
             base, _ = os.path.splitext(current)
-            self.out_path_var.set(base + ext)
+            # _save_as_ext is updated here too (not just out_path_var
+            # itself), and _save_as_programmatic_update suppresses
+            # _on_out_path_changed's user-edit detection around this
+            # write -- otherwise a plain format change would itself get
+            # latched as "the user manually customized the filename,"
+            # permanently disabling the mode-suffix auto-update over
+            # nothing more than an extension swap.
+            self._save_as_ext = ext
+            self._save_as_programmatic_update = True
+            try:
+                self.out_path_var.set(base + ext)
+            finally:
+                self._save_as_programmatic_update = False
         if fmt == "MP3 (VBR)":
             self.mp3_quality_row.pack(side="left")
         else:
@@ -3974,6 +4036,11 @@ class LoopCrossfadeGUI:
         self.sel_start, self.sel_end = 0, len(data)
         self.zoom_start, self.zoom_end = 0, len(data)
         self.preview_mode = False
+        self.repeat_var.set(False)  # a fresh file shouldn't inherit REPEAT from
+                                      # whatever was loaded before it -- same stale-
+                                      # state category as the LOOP-entry fix above,
+                                      # just for a different transition into "neither
+                                      # mode active"
         self._refresh_loop_and_repeat_icons()
         self.undo_stack.clear()
         self.redo_stack.clear()
@@ -3983,10 +4050,17 @@ class LoopCrossfadeGUI:
         # auto-fill Save As to the same directory as the loaded file, using
         # the currently-selected output FORMAT's extension (not necessarily
         # the input file's own extension, since only FLAC/MP4/MP3 are
-        # offered as save targets)
+        # offered as save targets). The mode suffix itself (RAW/REPEAT/
+        # LOOP) is added by _update_save_as_suffix, not hardcoded here --
+        # it reads current mode state, which is now guaranteed "neither"
+        # at this point via the resets just above, so this always starts
+        # a freshly-loaded file at " RAW".
         root_name, orig_ext = os.path.splitext(path)
         out_ext = FORMAT_EXT.get(self.format_var.get(), orig_ext)
-        self.out_path_var.set(os.path.normpath(root_name + " LOOP" + out_ext))
+        self._save_as_root = os.path.normpath(root_name)
+        self._save_as_ext = out_ext
+        self._save_as_user_customized = False
+        self._update_save_as_suffix()
 
         self._click_flag = None
         self._redraw()
@@ -4677,6 +4751,7 @@ class LoopCrossfadeGUI:
     def preview_mode(self, value):
         self._preview_mode = value
         self._refresh_process_button_label()
+        self._update_save_as_suffix()
 
     def _refresh_process_button_label(self):
         """Keeps the Process & Save button's own label in sync with
@@ -4707,6 +4782,57 @@ class LoopCrossfadeGUI:
             # LOOP both involve a real transform, so "Process & Save"
             # still accurately describes what pressing the button does.
             self.process_btn_var.set("Save Unprocessed")
+
+    def _mode_suffix(self):
+        """The Save As filename suffix for whichever mode is currently
+        active -- deliberately mirrors _refresh_process_button_label's
+        own mode logic (LOOP wins if somehow both are set) so the two
+        never disagree about what "the current mode" is. Per the user's
+        own confirmed spec: REPEAT always implies declicking, so it gets
+        its own name rather than "DECLICKED"."""
+        if self.preview_mode:
+            return " LOOP"
+        elif self.repeat_var.get():
+            return " REPEAT"
+        else:
+            return " RAW"
+
+    def _update_save_as_suffix(self):
+        """Keeps the Save As filename's mode suffix in sync with LOOP /
+        REPEAT / neither -- but ONLY while the field still holds exactly
+        what this method itself last wrote there. The moment the user
+        types anything else into it, _on_out_path_changed below latches
+        _save_as_user_customized True, and this permanently becomes a
+        no-op for the rest of this loaded file's session -- a manual
+        filename is never silently overwritten. Runs automatically on
+        every relevant state change: hooked into the preview_mode
+        property's setter and repeat_var's own trace_add, the same two
+        centralized points _refresh_process_button_label already uses,
+        so there's no separate list of call sites to keep in sync."""
+        if self._save_as_root is None or self._save_as_user_customized:
+            return
+        new_suffix = self._mode_suffix()
+        new_value = self._save_as_root + new_suffix + self._save_as_ext
+        self._save_as_programmatic_update = True
+        try:
+            self.out_path_var.set(new_value)
+        finally:
+            self._save_as_programmatic_update = False
+        self._save_as_current_suffix = new_suffix
+
+    def _on_out_path_changed(self, *args):
+        """Detects a genuine USER edit to Save As -- as opposed to this
+        same class's own programmatic updates, from either
+        _update_save_as_suffix above or _on_format_changed's extension
+        swap, both of which set _save_as_programmatic_update around
+        their own writes specifically so this can tell the difference --
+        and latches _save_as_user_customized so the suffix is never
+        auto-updated again for this file."""
+        if self._save_as_programmatic_update or self._save_as_root is None:
+            return
+        expected = self._save_as_root + self._save_as_current_suffix + self._save_as_ext
+        if self.out_path_var.get() != expected:
+            self._save_as_user_customized = True
 
     def _exit_preview_mode(self):
         """Swap the player back to raw (un-processed) audio -- used whenever
