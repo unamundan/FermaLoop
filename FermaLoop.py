@@ -5648,7 +5648,7 @@ class LoopCrossfadeGUI:
                      "Click in waveform to move playhead",
                      "Enable REPEAT or LOOP to audition effect",
                      "Optional: Stretch selection with PaulXStretch",
-                     "Set Power, Snap, Crossfade options",
+                     "Set desired LOOP XFade Curve/Overlap, Loop Alignments",
                      "Enable REPEAT or LOOP before saving to process selection",
                      "Crop and save"):
             ttk.Label(content, text=f"\u2022 {hint}", background=BG, foreground=MUTED,
