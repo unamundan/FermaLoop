@@ -1268,6 +1268,24 @@ class AudioPlayer:
             remaining = self.play_end - self.cursor
             if remaining <= 0:
                 if self.play_loop:
+                    # TEMPORARY diagnostic, same log file as the underrun
+                    # logging above -- logs the actual moment of each loop
+                    # wrap (capped, same reasoning as the underrun log) so
+                    # wrap timing/cadence can be directly compared against
+                    # when pops are actually heard, rather than inferred.
+                    # Safe to remove once the mechanism is identified.
+                    try:
+                        import datetime
+                        self._wrap_log_count = getattr(self, "_wrap_log_count", 0) + 1
+                        if self._wrap_log_count <= 30:
+                            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
+                            with open(log_path, "a") as f:
+                                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
+                                        f"WRAP #{self._wrap_log_count}: cursor was {self.cursor}, "
+                                        f"play_start={self.play_start}, play_end={self.play_end}, "
+                                        f"data.shape={self.data.shape}\n")
+                    except Exception:
+                        pass
                     self.cursor = self.play_start
                     remaining = self.play_end - self.cursor
                 else:
@@ -1301,6 +1319,24 @@ class AudioPlayer:
             self.cursor += n
             if n < frames_left:
                 if self.play_loop:
+                    # TEMPORARY diagnostic, same log file/cap/reasoning as
+                    # the other WRAP log above -- this is a SEPARATE wrap
+                    # path (mid-callback, rather than at the start of one),
+                    # so a wrap landing here instead wouldn't have shown up
+                    # in the other log at all. Safe to remove once the
+                    # mechanism is identified.
+                    try:
+                        import datetime
+                        self._wrap_log_count = getattr(self, "_wrap_log_count", 0) + 1
+                        if self._wrap_log_count <= 30:
+                            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
+                            with open(log_path, "a") as f:
+                                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
+                                        f"WRAP(mid-callback) #{self._wrap_log_count}: cursor was "
+                                        f"{self.cursor}, play_start={self.play_start}, "
+                                        f"play_end={self.play_end}, data.shape={self.data.shape}\n")
+                    except Exception:
+                        pass
                     self.cursor = self.play_start
                     n2 = min(frames_left - n, self.play_end - self.play_start)
                     chunk2 = self.data[self.play_start:self.play_start + n2]
@@ -5346,6 +5382,33 @@ class LoopCrossfadeGUI:
                 self.player.load(preview, self.sr)
                 self.player.set_loop(True, declick_wrap=False)
                 self.player.play()
+            # TEMPORARY diagnostic, same log file as the underrun logging
+            # in AudioPlayer._callback -- confirmed via that log's own
+            # ABSENCE (no file was even created, meaning `status` never
+            # came back truthy from sounddevice) that the reported
+            # post-crop popping isn't a buffer underrun/timing issue.
+            # This logs the actual computed boundaries instead, so a
+            # genuine mismatch (e.g. play_end not matching the real
+            # buffer length, or play_loop landing False when it should
+            # be True) would show up directly rather than needing to be
+            # inferred from code-reading alone. Safe to remove once the
+            # actual mechanism is identified.
+            try:
+                import datetime
+                log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
+                with open(log_path, "a") as f:
+                    f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
+                            f"_compute_and_play_loop_preview: was_already_auditioning="
+                            f"{was_already_auditioning}, preview.shape={preview.shape}, "
+                            f"used_xfade={used_xfade:.4f}s ({used_xfade*self.sr:.0f} samples), "
+                            f"player.data.shape={self.player.data.shape if self.player.data is not None else None}, "
+                            f"player.play_start={self.player.play_start}, "
+                            f"player.play_end={self.player.play_end}, "
+                            f"player.play_loop={self.player.play_loop}, "
+                            f"player.declick_loop_wrap={self.player.declick_loop_wrap}, "
+                            f"player.cursor={self.player.cursor}\n")
+            except Exception:
+                pass
             self.preview_mode = True
             # REPEAT and LOOP are mutually exclusive, and this is now the
             # active mode -- repeat_var was otherwise ONLY ever managed by
