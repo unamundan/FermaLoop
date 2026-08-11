@@ -4974,6 +4974,20 @@ class LoopCrossfadeGUI:
                 self.player.set_loop(True, declick_wrap=False)
                 self.player.play()
             self.preview_mode = True
+            # REPEAT and LOOP are mutually exclusive, and this is now the
+            # active mode -- repeat_var was otherwise ONLY ever managed by
+            # on_repeat_toggle, so if REPEAT had been used earlier in the
+            # session, entering LOOP left it stuck at True with nothing to
+            # ever reset it. on_repeat_toggle computes its own toggle
+            # direction from repeat_var's CURRENT value (not from which
+            # mode is visibly active), so that stale True made its very
+            # next press read as "turn REPEAT off" instead of "turn REPEAT
+            # on" -- confirmed directly via logging: entry showed
+            # repeat_var=True while LOOP was playing, and that single
+            # press exited with repeat_var=False, never touching
+            # preview_mode at all. This is the actual root cause; that
+            # logic in on_repeat_toggle was correct all along.
+            self.repeat_var.set(False)
             self._refresh_loop_and_repeat_icons()
             self._set_play_pause_icon(True)
 
