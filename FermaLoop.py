@@ -3096,6 +3096,9 @@ class LoopCrossfadeGUI:
         self.zoom_end = 0
         self.canvas_width = 700
         self.canvas_height = 160
+        self._canvas_resize_after_id = None  # debounce state for the waveform's
+                                               # own resize handler, see
+                                               # _on_canvas_resize below
         self.drag_mode = None      # None | "start" | "end" | "new" | "pending"
         self.drag_anchor_x = None
         self.pre_drag_selection = None
@@ -3328,45 +3331,6 @@ class LoopCrossfadeGUI:
         rc["current_height"] = new_height
         rc["canvas"].configure(height=new_height)
         rc["redraw"]()
-
-    def _update_box_layout(self):
-        """Switches the CURVE/XFADE/LOOP row between side-by-side (when
-        there's room for all three at their natural width) and stacked
-        (each full-width, one above the other) when there isn't -- this
-        is what lets the window's true minimum width be as small as a
-        SINGLE box's natural width, rather than needing to fit all three
-        side by side at once. Only re-packs when the mode actually
-        changes, not on every resize event.
-
-        Restored verbatim from the pre-group-wrapper version of this
-        file (confirmed working via direct user testing against that
-        exact file) after an earlier round of this session removed it
-        based on an unverified assumption that it was unreachable in
-        practice -- that assumption was never actually confirmed against
-        a real display, and it was wrong. Now called from
-        _redraw_loop_group (see the group-wrapper setup) rather than
-        from cols_row's own <Configure> binding, since cols_row's width
-        is set explicitly via itemconfigure from there now instead of
-        coming from its own pack(fill="x")."""
-        available = self._cols_row.winfo_width()
-        if available < 10:
-            available = self.root.winfo_width() or self._side_by_side_min_width
-        mode = "side_by_side" if available >= self._side_by_side_min_width else "stacked"
-        if mode == self._box_layout_mode:
-            return
-        self._box_layout_mode = mode
-
-        for box_outer, _ in self._box_pairs:
-            box_outer.pack_forget()
-
-        if mode == "side_by_side":
-            for (box_outer, _), pad in zip(self._box_pairs, self._box_side_by_side_paddings):
-                box_outer.pack(side="left", fill="both", expand=True, padx=pad)
-                self._set_box_height(box_outer, self._boxes_shared_height)
-        else:
-            for box_outer, _ in self._box_pairs:
-                box_outer.pack(fill="x", pady=(0, 6))
-                self._set_box_height(box_outer, box_outer._rc["natural_h"])
 
     def _on_auto_detect_clicked(self):
         self.auto_xfade_var.set(True)
@@ -3752,22 +3716,11 @@ class LoopCrossfadeGUI:
                 return  # not yet realized; the initial call right after bind() below covers this
             content_w = max(1, canvas_w - GROUP_MARGIN * 2)
             loop_group_canvas.itemconfigure(cols_row_window, width=content_w)
-            loop_group_canvas.update_idletasks()
-            # Decide side-by-side vs. stacked for THIS width before
-            # measuring height below -- cols_row no longer has its own
-            # independent <Configure> binding to drive this (its width
-            # comes from the explicit itemconfigure above, not its own
-            # pack(fill="x")), so this is where that decision has to
-            # happen now. Must run BEFORE the height measurement, or that
-            # measurement would reflect whichever mode was previously
-            # active rather than the one this resize actually calls for.
-            self._update_box_layout()
-            # height must be measured AFTER both the width change above
-            # AND the layout-mode decision are actually applied, not
-            # before -- otherwise this reads a stale height from either
-            # the previous width or the previous stacked/side-by-side
-            # mode, exactly the class of stale-measurement bug already
-            # hit more than once elsewhere in this file.
+            # height must be measured AFTER the width change above is
+            # actually applied, not before -- otherwise this reads a
+            # stale height from the previous width, the class of
+            # stale-measurement bug already hit more than once elsewhere
+            # in this file.
             loop_group_canvas.update_idletasks()
             content_h = cols_row.winfo_reqheight()
             box_h = content_h + GROUP_MARGIN * 2
@@ -3890,19 +3843,22 @@ class LoopCrossfadeGUI:
             natural_heights.append(nh)
         self._boxes_shared_height = max(natural_heights)
 
-        # Packed once here; _update_box_layout (restored below, exactly
-        # as it worked in the pre-group-wrapper version of this file --
-        # confirmed via direct testing against that file, not assumption)
-        # switches between side-by-side and stacked at runtime as the
-        # window resizes. An earlier round of this session removed
-        # stacking based on an UNVERIFIED claim that it was unreachable
-        # in practice; that claim was wrong, and removing it caused a
-        # real regression -- boxes overflowing/disappearing at narrow
-        # widths with no graceful fallback, instead of stacking
-        # vertically the way they're supposed to.
-        self._box_layout_mode = None  # forces the first _update_box_layout call to actually apply
-        self._side_by_side_min_width = sum(natural_widths) + 16  # +padx gaps between boxes
-        self._stacked_min_width = max(natural_widths)
+        # Packed side-by-side once, directly, with no runtime switching.
+        # A stacked (vertical) fallback used to exist here, letting the
+        # window's true minimum width be as small as a single box's
+        # natural width -- deliberately restored once already this
+        # session after an earlier removal turned out to be based on an
+        # unverified, wrong assumption (see the transcript). This
+        # removal is different: an explicit, informed choice -- the
+        # collapsibility genuinely isn't wanted, on either platform, and
+        # a fresh install with no saved window size yet was defaulting
+        # to this narrow/stacked/tall arrangement on macOS specifically
+        # (Windows only avoided it because a saved size from prior
+        # testing already existed). All three boxes now always render
+        # side by side; the true minimum width is simply what that needs.
+        for (box_outer, _), pad in zip(self._box_pairs, self._box_side_by_side_paddings):
+            box_outer.pack(side="left", fill="both", expand=True, padx=pad)
+            self._set_box_height(box_outer, self._boxes_shared_height)
 
         btn_process = ttk.Button(outer, style="Accent.TButton",
                    command=self.run_process, takefocus=0)
@@ -4156,6 +4112,36 @@ class LoopCrossfadeGUI:
 
     def _on_canvas_resize(self, event):
         self.canvas_width, self.canvas_height = event.width, event.height
+        # Debounced: this used to call _redraw() unconditionally, on
+        # EVERY <Configure> tick during an active resize drag -- which
+        # can fire many times per second -- meaning the full waveform
+        # (render_waveform_image, processing the entire visible audio
+        # segment) got expensively re-rendered back to back, with no
+        # gaps, for as long as the drag continued. Because Python's GIL
+        # means CPU-bound work on THIS (GUI) thread directly delays the
+        # SEPARATE audio callback thread from running, and that callback
+        # has an extremely tight budget (blocksize=256 at 44.1kHz is
+        # roughly 5.8ms per invocation -- see play()), a resize drag
+        # alone was enough to starve it into genuine buffer underruns.
+        # Reported directly: aggressive clicking/popping starting the
+        # moment a resize began, regardless of LOOP/REPEAT state --
+        # which itself points at resize-triggered CPU contention rather
+        # than anything about the audio data or processing mode.
+        # Waiting for the resize to actually settle before doing the
+        # expensive render, instead of on every intermediate tick, is
+        # the standard fix for this class of problem -- the canvas
+        # widget's own on-screen bounds still track the drag smoothly
+        # via Tk's normal geometry handling either way; only the
+        # waveform IMAGE's content lags by this delay.
+        if self._canvas_resize_after_id is not None:
+            try:
+                self.root.after_cancel(self._canvas_resize_after_id)
+            except Exception:
+                pass
+        self._canvas_resize_after_id = self.root.after(120, self._finish_canvas_resize)
+
+    def _finish_canvas_resize(self):
+        self._canvas_resize_after_id = None
         self._redraw()
 
     def _visible_range(self):
@@ -5648,7 +5634,7 @@ class LoopCrossfadeGUI:
                      "Click in waveform to move playhead",
                      "Enable REPEAT or LOOP to audition effect",
                      "Optional: Stretch selection with PaulXStretch",
-                     "Set desired LOOP XFade Curve/Overlap, Loop Alignments",
+                     "Set desired LOOP XFade Curve/Overlap & Alignment options",
                      "Enable REPEAT or LOOP before saving to process selection",
                      "Crop and save"):
             ttk.Label(content, text=f"\u2022 {hint}", background=BG, foreground=MUTED,
@@ -5842,62 +5828,21 @@ class LoopCrossfadeGUI:
         self.root.update_idletasks()
         _log_startup("_apply_saved_or_natural_size: after initial update_idletasks()")
 
-        # Measure the STACKED-mode size first (CURVE/XFADE/LOOP stacked
-        # vertically) -- this becomes BOTH the default "narrowest
-        # natural" window size on first launch AND the true minimum
-        # width floor, computed together in one pass. A stacked box only
-        # ever needs to fit itself, not compete with two others for
-        # space side by side, so this is naturally much narrower than
-        # the side-by-side layout.
-        #
-        # Restored from the pre-group-wrapper version of this file,
-        # confirmed correct via direct testing against that exact file
-        # after an earlier round of this session removed it based on an
-        # unverified assumption (that it was unreachable in practice)
-        # which turned out to be wrong -- removing it caused a real
-        # regression: boxes overflowing/disappearing at narrow widths
-        # instead of gracefully stacking. Merged here with the group
-        # border/tail wrapper added since that removal.
-        #
-        # Each canvas's <Configure> binding triggers a full supersampled
-        # PIL render on every resize -- correct for actual on-screen
-        # resizing, but this measurement pass alone involves several
-        # pack/repack cycles that don't need to be seen, only measured.
-        # Left bound, this was rendering each box 4-5+ times before
-        # settling. Temporarily unbinding for the measurement-only
-        # portion and restoring it right before the one real, visible
-        # layout pass cuts that down to a single render per box.
+        # Measure the box row's natural (side-by-side, the only
+        # arrangement that exists now) size directly -- no more force-
+        # stacked-to-measure-then-restore-side-by-side dance. Each box's
+        # canvas still needs its width/height explicitly set before
+        # measuring: a bare tk.Canvas without an explicit -width doesn't
+        # compute winfo_reqwidth() from its content, it just reports
+        # whatever it was last actually rendered at.
         for box_outer, _ in self._box_pairs:
-            box_outer._rc["canvas"].unbind("<Configure>")
-
-        self._box_layout_mode = None
-        for box_outer, _ in self._box_pairs:
-            box_outer.pack_forget()
-        for box_outer, _ in self._box_pairs:
-            box_outer.pack(fill="x", pady=(0, 6))
-            # NOT using _set_box_height here: it calls redraw() directly,
-            # completely bypassing the <Configure> unbind above. This
-            # measurement pass only needs the dimensions actually
-            # configured for accurate winfo_reqwidth()/reqheight()
-            # readings, not a rendered result of an intermediate state
-            # nobody will ever see.
-            box_outer._rc["current_height"] = box_outer._rc["natural_h"]
-            box_outer._rc["canvas"].configure(height=box_outer._rc["natural_h"])
-            # a bare tk.Canvas without an explicit -width doesn't compute
-            # winfo_reqwidth() from its content -- it just reports
-            # whatever its last actual rendered size happened to be.
-            # Explicitly setting it here forces an accurate reading of
-            # the box's real natural content width for this measurement.
-            box_outer._rc["canvas"].configure(width=box_outer._rc["natural_w"])
-        _log_startup("_apply_saved_or_natural_size: after measurement-phase pack/configure loop (no renders should have fired)")
-        self._box_layout_mode = "stacked"
+            box_outer._rc["canvas"].configure(
+                width=box_outer._rc["natural_w"], height=box_outer._rc["natural_h"])
+        _log_startup("_apply_saved_or_natural_size: after box canvas width/height configure")
 
         # The loop-group canvas (wraps XFADE CURVE/OVERLAP/LOOP ALIGNMENT
-        # with the border+tail) is ALSO a bare tk.Canvas with no
-        # explicit width/height -- the same issue as the individual box
-        # canvases above, so it gets the same explicit-configure
-        # treatment, sized to whatever cols_row needs while ITS content
-        # is this same stacked arrangement.
+        # with the border+tail) has the same bare-canvas issue, sized to
+        # whatever cols_row needs at this same natural, side-by-side width.
         self._loop_group_cols_row.update_idletasks()
         _group_content_w = self._loop_group_cols_row.winfo_reqwidth()
         _group_content_h = self._loop_group_cols_row.winfo_reqheight()
@@ -5908,7 +5853,7 @@ class LoopCrossfadeGUI:
         )
 
         self.root.update()  # full update -- reqwidth needs a real event
-                             # pass to settle and reflect this pack change
+                             # pass to settle and reflect this configure change
         _log_startup("_apply_saved_or_natural_size: after self.root.update() (forced full event processing)")
         content_w = self.root.winfo_reqwidth()
         natural_h = self.root.winfo_reqheight()  # baseline BEFORE swapping in worst-case text
@@ -5966,21 +5911,14 @@ class LoopCrossfadeGUI:
             self.root.geometry(f"{w}x{h}")
         _log_startup("_apply_saved_or_natural_size: after applying final geometry()")
 
-        # restore each canvas's real <Configure> binding NOW, right
-        # before the one layout pass that actually needs to be seen
-        for box_outer, _ in self._box_pairs:
-            box_outer._rc["canvas"].bind("<Configure>", box_outer._rc["redraw"])
-
-        self._box_layout_mode = None  # forces _update_box_layout (called from within
-                                       # _redraw_loop_group) to re-evaluate for the
-                                       # actual applied size
-        self._redraw_loop_group()  # the one real, visible render pass -- draws the
-                                    # group border/tail AND settles side-by-side vs.
-                                    # stacked for whichever width was just applied
-        self.root.minsize(content_w, content_h)  # content_w IS the stacked-mode width
-                                                  # measured above, so this is already
-                                                  # the true minimum, not the wider
-                                                  # comfortable default
+        self._redraw_loop_group()  # the one real, visible render pass -- draws
+                                    # the group border/tail at its final size
+        self.root.minsize(content_w, content_h)  # content_w/content_h ARE the
+                                                  # natural side-by-side size
+                                                  # measured above, so this is
+                                                  # already the true minimum --
+                                                  # no collapsibility below it,
+                                                  # by design
         _log_startup("_apply_saved_or_natural_size: done")
 
     def _on_close(self):
