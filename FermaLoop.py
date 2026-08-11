@@ -5260,7 +5260,6 @@ class LoopCrossfadeGUI:
         factor_var = tk.StringVar(value="8.0")
         factor_entry = RoundedEntry(row, factor_var, BG, FIELD_BG, FG, BORDER, height=28, radius=8, width=80)
         factor_entry.pack(side="right")
-        self._defocus_on_return(factor_entry.entry)
         ttk.Label(dlg, text="Typical range: 2-50 (higher takes longer and produces much longer output)",
                   background=BG, foreground=MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(2, 8))
 
@@ -5269,7 +5268,6 @@ class LoopCrossfadeGUI:
         window_var = tk.StringVar(value="0.25")
         stretch_window_entry = RoundedEntry(row, window_var, BG, FIELD_BG, FG, BORDER, height=28, radius=8, width=80)
         stretch_window_entry.pack(side="right")
-        self._defocus_on_return(stretch_window_entry.entry)
         ttk.Label(dlg, text="Typical range: 0.05-2.0 seconds (0.1-0.25 is a good starting point)",
                   background=BG, foreground=MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(2, 0))
         ttk.Label(dlg, text="Smaller reduces amplitude pulsing but can sound grainier/less full; "
@@ -5344,10 +5342,23 @@ class LoopCrossfadeGUI:
         ttk.Button(btn_group, text="Stretch", style="Accent.TButton", command=apply_stretch).pack(side="left")
         ttk.Button(btn_group, text="Cancel", command=close_dialog).pack(side="left", padx=(6, 0))
 
-        # A SECOND Return/Enter (after the first has already defocused an
-        # entry field back to the dialog itself, see _defocus_on_return)
-        # activates Stretch, the same as clicking the button -- lets the
-        # whole "type a value, confirm, run it" flow stay on the keyboard.
+        # A single Return/Enter immediately runs Stretch using whatever
+        # values are currently in the fields -- if the person hasn't
+        # touched them, that's the shown defaults, which is exactly the
+        # "assume current settings are wanted" behavior asked for. This
+        # used to require a first Enter to defocus the entry (via
+        # _defocus_on_return) before a SECOND Enter, now at the dialog
+        # level, actually ran Stretch -- that existed because the entry's
+        # own binding returned "break", stopping the same keypress from
+        # also reaching dlg's binding below. Binding the entries directly
+        # to apply_stretch here removes the need for that relay entirely,
+        # without touching focus_force() below (the actual fix for the
+        # separate Windows issue where the dialog never got real OS-level
+        # keyboard focus in the first place -- unrelated to this).
+        factor_entry.entry.bind("<Return>", lambda e: apply_stretch())
+        factor_entry.entry.bind("<KP_Enter>", lambda e: apply_stretch())
+        stretch_window_entry.entry.bind("<Return>", lambda e: apply_stretch())
+        stretch_window_entry.entry.bind("<KP_Enter>", lambda e: apply_stretch())
         dlg.bind("<Return>", lambda e: apply_stretch())
         dlg.bind("<KP_Enter>", lambda e: apply_stretch())
         # Cmd+. on macOS / Ctrl+. on Windows cancels, matching each
@@ -5560,12 +5571,12 @@ class LoopCrossfadeGUI:
 
         ttk.Label(content, text="HINTS", background=BG, foreground=FG,
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=12, pady=(0, 4))
-        for hint in ("Drag to select",
-                     "Drag edges to adjust",
+        for hint in ("Drag to select; drag edges to adjust",
                      "Click in waveform to move playhead",
-                     "Enable Repeat or Audition to preview loop",
+                     "Enable REPEAT or LOOP to audition effect",
                      "Optional: Stretch selection with PaulXStretch",
                      "Set Power, Snap, Crossfade options",
+                     "Enable REPEAT or LOOP before saving to process selection",
                      "Crop and save"):
             ttk.Label(content, text=f"\u2022 {hint}", background=BG, foreground=MUTED,
                       font=("Segoe UI", 9)).pack(anchor="w", padx=22, pady=1)
