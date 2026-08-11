@@ -5233,6 +5233,27 @@ class LoopCrossfadeGUI:
         what crossfade length it would currently pick, so toggling the
         checkbox (or changing the selection/curve/snap settings) gives
         immediate feedback without requiring playback."""
+        # TEMPORARY diagnostic, same log file as the other audio
+        # diagnostics -- the post-crop pops turned out to correlate with
+        # _compute_and_play_loop_preview being invoked AGAIN, roughly once
+        # per loop cycle, with no explicit L/Space press to explain it.
+        # This function (specifically its preview_mode branch) is the
+        # ONLY other path that calls it -- so logging exactly which
+        # tracked variable's trace fired should show what's actually
+        # triggering it. args is Tk's own (var_name, index, mode) for
+        # whichever variable's trace this is. Safe to remove once the
+        # actual trigger is identified.
+        try:
+            import datetime
+            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
+            with open(log_path, "a") as f:
+                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
+                        f"_on_param_changed fired: args={args}, preview_mode={self.preview_mode}, "
+                        f"xfade_var={self.xfade_var.get()!r}, curve_var={self.curve_var.get()!r}, "
+                        f"auto_xfade_var={self.auto_xfade_var.get()!r}, snap_var={self.snap_var.get()!r}, "
+                        f"window_var={self.window_var.get()!r}\n")
+        except Exception:
+            pass
         if self._live_update_after_id is not None:
             self.root.after_cancel(self._live_update_after_id)
         if self.preview_mode:
