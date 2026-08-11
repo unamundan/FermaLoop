@@ -2027,12 +2027,24 @@ def render_rounded_box_with_tail_image(w, h, radius, fill_hex, border_hex, tail_
     tall overall, with the main box occupying the bottom h pixels and
     the tail occupying the top tail_h-pixel strip.
 
-    Draw order matters here: the main rect (with its full border,
-    including the top edge) is drawn first, then the tail's FILL is
-    drawn on top -- deliberately covering the portion of the box's own
-    top border line that falls within the tail's base -- and only then
-    are the tail's two slanted SIDE edges drawn with the border color
-    (not its base). That's what makes the final outline read as one
+    fill_hex may be None for an OUTLINE-ONLY box (fully transparent
+    interior, just the border stroke) -- used for the group container
+    specifically, so the margin between this outline and the individual
+    boxes it wraps shows the canvas's own background color underneath,
+    rather than this shape's own fill creating a second, visually
+    mismatched panel-colored layer in that margin (and in the gaps
+    between the individual boxes, which sit on top of this one but
+    don't cover its full interior either).
+
+    Draw order matters here. When fill_hex IS given: the main rect (with
+    its full border, including the top edge) is drawn first, then the
+    tail's FILL is drawn on top -- deliberately covering the portion of
+    the box's own top border line that falls within the tail's base --
+    and only then are the tail's two slanted SIDE edges drawn with the
+    border color (not its base). When fill_hex is None, there's no fill
+    to cover that segment with, so it's explicitly ERASED (painted fully
+    transparent) instead before the tail's two slanted edges are drawn.
+    Either way, the goal is the same: the final outline reads as one
     continuous path (box top edge -> up one tail side -> point -> down
     the other tail side -> back to box top edge) rather than a separate
     triangle glued on top with a stray line across its own base."""
@@ -2043,7 +2055,7 @@ def render_rounded_box_with_tail_image(w, h, radius, fill_hex, border_hex, tail_
     img = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     box_top = tail_h * supersample
-    fill_rgba = _hex_to_rgb(fill_hex) + (255,)
+    fill_rgba = (_hex_to_rgb(fill_hex) + (255,)) if fill_hex else None
     border_rgba = _hex_to_rgb(border_hex) + (255,)
     border_w = max(1, supersample)
 
@@ -2053,8 +2065,12 @@ def render_rounded_box_with_tail_image(w, h, radius, fill_hex, border_hex, tail_
     if tail_h > 0:
         tx = tail_x * supersample
         tw = tail_w * supersample
-        draw.polygon([(tx - tw / 2, box_top + border_w), (tx + tw / 2, box_top + border_w), (tx, 0)],
-                     fill=fill_rgba)
+        if fill_rgba is not None:
+            draw.polygon([(tx - tw / 2, box_top + border_w), (tx + tw / 2, box_top + border_w), (tx, 0)],
+                         fill=fill_rgba)
+        else:
+            draw.rectangle([tx - tw / 2, box_top - border_w, tx + tw / 2, box_top + border_w],
+                            fill=(0, 0, 0, 0))
         draw.line([(tx - tw / 2, box_top), (tx, 0)], fill=border_rgba, width=border_w)
         draw.line([(tx, 0), (tx + tw / 2, box_top)], fill=border_rgba, width=border_w)
 
@@ -3566,7 +3582,7 @@ class LoopCrossfadeGUI:
             tail_x = max(GROUP_MARGIN + 10, min(canvas_w - GROUP_MARGIN - 10, tail_x))
 
             img = render_rounded_box_with_tail_image(
-                canvas_w, box_h, radius=10, fill_hex=PANEL, border_hex=BORDER,
+                canvas_w, box_h, radius=10, fill_hex=None, border_hex=BORDER,
                 tail_x=tail_x, tail_w=16, tail_h=GROUP_TAIL_H,
             )
             photo = ImageTk.PhotoImage(img)
@@ -5339,21 +5355,31 @@ class LoopCrossfadeGUI:
         # minsize() gets its OWN, genuinely smaller floor than the
         # comfortable default geometry above -- using content_w/content_h
         # directly here locked the window's MINIMUM size to equal its
-        # DEFAULT size, making it impossible to narrow at all (reported
-        # directly: dragging either edge did nothing). The three boxes
-        # already handle being given less width gracefully via their own
-        # fill=both/expand=True packing inside cols_row, whose width gets
-        # explicitly reset on every resize in _redraw_loop_group -- that
-        # flexibility already exists and already works for ordinary
-        # resize events, it just never got the chance to engage below
-        # the "natural" size specifically because minsize was blocking
-        # the window from ever reaching it. The floor here is the widest
-        # SINGLE box's own comfortable width (so at least one box always
-        # has room to render normally) plus a fixed allowance for the
-        # other two at a visibly compressed, but not unusably tiny,
-        # width -- clamped so it's never wider than the default itself.
-        _widest_box_w = max(box_outer._rc["natural_w"] for box_outer, _ in self._box_pairs)
-        min_w = min(content_w, _widest_box_w + self._loop_group_margin * 2 + 220)
+        # DEFAULT size, making it impossible to narrow at all.
+        #
+        # The floor here is the TRUE minimum at which all three boxes
+        # still fit at their own natural width, not an arbitrary smaller
+        # number: each box's CONTENT (the inner frame holding its radio
+        # buttons/entry fields) is embedded via create_window with no
+        # width constraint of its own, so it always renders at its full
+        # natural width regardless of the canvas's actual size -- that
+        # natural width is what rc["natural_w"] literally IS. Letting
+        # the window narrow further than this sum doesn't make the boxes
+        # compress gracefully; it makes their background panel shrink
+        # while their content stays full width and overflows it,
+        # pushing the rightmost boxes off the visible area entirely
+        # (reported directly: LOOP ALIGNMENT and then XFADE OVERLAP
+        # disappearing off the right edge as the window narrowed).
+        # Genuinely reflowing that content at narrow widths would need
+        # much more invasive per-box layout work; the safer fix, and the
+        # same strategy already used for the stacking issue, is making
+        # the broken state unreachable rather than partially mitigating
+        # it -- the window can still narrow meaningfully (dropping the
+        # comfortable group margin/padding), just not past the point
+        # where the boxes themselves would break.
+        _boxes_natural_sum = sum(box_outer._rc["natural_w"] for box_outer, _ in self._box_pairs)
+        _inter_box_padding = sum(sum(pad) for pad in self._box_side_by_side_paddings)
+        min_w = min(content_w, _boxes_natural_sum + _inter_box_padding + self._loop_group_margin * 2)
         self.root.minsize(min_w, content_h)  # height floor UNCHANGED -- it protects the
                                               # worst-case status message from getting
                                               # clipped again if manually shrunk; only
