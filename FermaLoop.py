@@ -985,9 +985,33 @@ class AudioPlayer:
         self.play_loop = False
         self.on_natural_stop = None  # optional callback, called from GUI thread via `after`
         self.declick_total = 1        # samples in the current declick fade-in ramp
+        self.wrap_declick_total = 1   # samples in the (shorter) REPEAT-wrap fade -- both
+                                       # get a real value in load(); 1 here is just a safe
+                                       # default matching declick_total's own pattern above,
+                                       # in case anything ever reads it before a file is loaded
         self.declick_remaining = 0    # samples of that ramp still left to apply
+        self.declick_total_active = 1  # denominator for the CURRENT fade-in in
+                                        # progress (declick_remaining counts down
+                                        # against this) -- separate from
+                                        # pending_jump_declick_total below so a
+                                        # new jump starting mid-fade-in can't
+                                        # change the denominator out from under
+                                        # an already-in-progress fade-in curve
         self.pending_cursor = None    # target cursor once an in-progress fade-out completes
         self.fadeout_remaining = 0    # samples of the pre-jump fade-out still left to apply
+        self.pending_jump_declick_total = 1  # denominator for the CURRENT pending
+                                              # jump's fade-out/fade-in curves --
+                                              # set to declick_total for an explicit
+                                              # seek, or wrap_declick_total for a
+                                              # REPEAT loop-wrap (see set_loop):
+                                              # the same 50ms fade that's barely
+                                              # noticeable on a one-off seek click
+                                              # became an audible periodic "dip"
+                                              # when the identical duration applied
+                                              # to a wrap that repeats every loop
+                                              # cycle -- reported directly (a wrap
+                                              # dip that "sounds like a fade set to
+                                              # a length that's too long")
         self.declick_loop_wrap = False  # True: REPEAT's raw loop -- wrap gets the same
                                          # fade-out/fade-in as a seek. False: an already
                                          # crossfade-PROCESSED preview buffer (Audition/LOOP),
@@ -1002,7 +1026,16 @@ class AudioPlayer:
             data = data[:, None]
         self.data = np.ascontiguousarray(data.astype(np.float32))
         self.sr = sr
-        self.declick_total = max(1, int(sr * 0.05))  # 50ms fade-in, applied after any jump
+        self.declick_total = max(1, int(sr * 0.05))  # 50ms fade, applied after an explicit seek
+        self.wrap_declick_total = max(1, int(sr * 0.01))  # 10ms fade, applied at a REPEAT loop
+                                                            # wrap specifically -- short enough
+                                                            # to still fully mask the underlying
+                                                            # discontinuity (the original problem
+                                                            # was a genuine waveform discontinuity,
+                                                            # not a need for any particular fade
+                                                            # length) while being ~5x shorter than
+                                                            # the seek fade, since this one repeats
+                                                            # every loop cycle rather than firing once
         with self.lock:
             self.sel_start, self.sel_end, self.cursor = 0, len(self.data), 0
             self.play_start, self.play_end = 0, len(self.data)
@@ -1056,6 +1089,7 @@ class AudioPlayer:
                 # just as audibly as an unfaded start would have.
                 self.pending_cursor = target
                 self.fadeout_remaining = self.declick_total
+                self.pending_jump_declick_total = self.declick_total
             else:
                 self.cursor = target
 
@@ -1115,9 +1149,10 @@ class AudioPlayer:
             # precisely at play_end regardless of which callback first
             # detects the condition.
             if (self.declick_loop_wrap and self.play_loop and self.pending_cursor is None
-                    and 0 < self.play_end - self.cursor <= self.declick_total):
+                    and 0 < self.play_end - self.cursor <= self.wrap_declick_total):
                 self.pending_cursor = self.play_start
                 self.fadeout_remaining = self.play_end - self.cursor
+                self.pending_jump_declick_total = self.wrap_declick_total
 
             write_offset = 0
             if self.pending_cursor is not None:
@@ -1139,8 +1174,8 @@ class AudioPlayer:
                     # gain 1.0 (no abruptness at the moment the fade
                     # begins) and eases down to 0 with the same
                     # raised-cosine shape, just run in reverse.
-                    t_start = 1.0 - self.fadeout_remaining / self.declick_total
-                    t_end = 1.0 - (self.fadeout_remaining - nfo) / self.declick_total
+                    t_start = 1.0 - self.fadeout_remaining / self.pending_jump_declick_total
+                    t_end = 1.0 - (self.fadeout_remaining - nfo) / self.pending_jump_declick_total
                     t = np.linspace(t_start, t_end, nfo, endpoint=False)
                     gains = np.cos(t * np.pi / 2).astype(np.float32).reshape(-1, 1)
                     outdata[:nfo] = chunk * gains
@@ -1175,7 +1210,8 @@ class AudioPlayer:
                     self.cursor = self.pending_cursor
                     self.pending_cursor = None
                     self._apply_bounds_from_cursor()
-                    self.declick_remaining = self.declick_total
+                    self.declick_remaining = self.pending_jump_declick_total
+                    self.declick_total_active = self.pending_jump_declick_total
 
             frames_left = frames - write_offset
             if frames_left <= 0:
@@ -1208,8 +1244,8 @@ class AudioPlayer:
                 # used in an earlier version of this, actually has its
                 # STEEPEST slope at t=0, the opposite of what was intended.)
                 ramp_n = min(n, self.declick_remaining)
-                t_start = 1.0 - self.declick_remaining / self.declick_total
-                t_end = 1.0 - (self.declick_remaining - ramp_n) / self.declick_total
+                t_start = 1.0 - self.declick_remaining / self.declick_total_active
+                t_end = 1.0 - (self.declick_remaining - ramp_n) / self.declick_total_active
                 t = np.linspace(t_start, t_end, ramp_n, endpoint=False)
                 gains = (1.0 - np.cos(t * np.pi / 2)).astype(np.float32).reshape(-1, 1)
                 outdata[write_offset:write_offset + ramp_n] *= gains
@@ -1241,6 +1277,7 @@ class AudioPlayer:
             # auditioning stops/reloads/replays, which is its own kind of
             # jump and had the same audible-pop problem)
             self.declick_remaining = self.declick_total
+            self.declick_total_active = self.declick_total
             self.pending_cursor = None  # defensive: no stale jump from a previous session
             self.fadeout_remaining = 0
         channels = self.data.shape[1]
@@ -1295,6 +1332,7 @@ class AudioPlayer:
                 self.play_start, self.play_end = 0, len(new_data)
                 self.play_loop = self.loop
                 self.declick_remaining = self.declick_total
+                self.declick_total_active = self.declick_total
                 return True
         self.stop()
         self.load(new_data, sr)
@@ -3001,7 +3039,12 @@ class LoopCrossfadeGUI:
         self.pre_drag_selection = None
         self.undo_stack = []
         self.redo_stack = []
-        self.preview_mode = False  # True while the player holds a processed preview, not raw audio
+        self._preview_mode = False  # backing field for the preview_mode property below;
+                                     # True while the player holds a processed preview, not
+                                     # raw audio. Set directly here (not via self.preview_mode
+                                     # = ...) specifically because that property's setter
+                                     # calls _refresh_process_button_label(), which reads
+                                     # self.repeat_var -- not created until a few lines below.
         self._wave_photo = None    # keep a reference so PIL's PhotoImage isn't garbage collected
         self._icon_cache = {}      # keeps icon PhotoImage references alive too
         self._loop_anim_after_id = None
@@ -3025,6 +3068,7 @@ class LoopCrossfadeGUI:
         self.snap_var = tk.BooleanVar(value=False)
         self.window_var = tk.StringVar(value="0.25")
         self.repeat_var = tk.BooleanVar(value=False)
+        self.repeat_var.trace_add("write", lambda *a: self._refresh_process_button_label())
         self.status_var = tk.StringVar(value="")
         self.time_var = tk.StringVar(value="00:00:00.000")
         self.selection_duration_var = tk.StringVar(value="Selection: --")
@@ -3632,7 +3676,15 @@ class LoopCrossfadeGUI:
             tail_x = max(GROUP_MARGIN + 10, min(canvas_w - GROUP_MARGIN - 10, tail_x))
 
             img = render_rounded_box_with_tail_image(
-                canvas_w, box_h, radius=10, fill_hex=None, border_hex=BORDER,
+                # radius is inner_radius(12) + GROUP_MARGIN(8) = 20, not an
+                # arbitrary bump -- that's the radius that makes this
+                # curve CONCENTRIC with the child boxes' own 12px corners,
+                # offset outward by exactly the margin between them, which
+                # is what actually reads as "hugging" them rather than
+                # just being a same-ish-sized curve independently applied
+                # to a bigger rectangle. Previously 10 -- smaller than the
+                # children's own 12, when it should be visibly larger.
+                canvas_w, box_h, radius=20, fill_hex=None, border_hex=BORDER,
                 tail_x=tail_x, tail_w=16, tail_h=GROUP_TAIL_H,
             )
             photo = ImageTk.PhotoImage(img)
@@ -3745,8 +3797,18 @@ class LoopCrossfadeGUI:
         self._side_by_side_min_width = sum(natural_widths) + 16  # +padx gaps between boxes
         self._stacked_min_width = max(natural_widths)
 
-        btn_process = ttk.Button(outer, text="Process & Save", style="Accent.TButton",
+        btn_process = ttk.Button(outer, style="Accent.TButton",
                    command=self.run_process, takefocus=0)
+        self.process_btn_var = tk.StringVar(value="Process & Save: Unprocessed")
+        btn_process.configure(textvariable=self.process_btn_var)
+        self._refresh_process_button_label()  # repeat_var's own trace_add only fires on
+                                                # FUTURE changes, and preview_mode's initial
+                                                # __init__ assignment deliberately bypassed
+                                                # the property setter (see its comment) -- so
+                                                # without this explicit call here, the button
+                                                # would show its StringVar's hardcoded default
+                                                # above rather than a value actually computed
+                                                # from current state
         btn_process.pack(fill="x", pady=(8, 8))
         ToolTip(btn_process, "Crossfade the current selection and save it to the 'Save as' path")
 
@@ -3905,9 +3967,10 @@ class LoopCrossfadeGUI:
 
     # ---------------- undo / redo ----------------
 
-    def _snapshot(self):
+    def _snapshot(self, label="change"):
         return {"data": self.data, "sel_start": self.sel_start, "sel_end": self.sel_end,
-                "cropped": self.cropped, "zoom_start": self.zoom_start, "zoom_end": self.zoom_end}
+                "cropped": self.cropped, "zoom_start": self.zoom_start, "zoom_end": self.zoom_end,
+                "label": label}
 
     def _restore(self, snap):
         self.data = snap["data"]
@@ -3922,23 +3985,32 @@ class LoopCrossfadeGUI:
         self._update_selection_duration_label()
         self._update_auto_crossfade_preview()
 
-    def push_undo(self):
-        self.undo_stack.append(self._snapshot())
+    def push_undo(self, label="change"):
+        """`label` names the operation this snapshot's later restoration
+        would undo (e.g. "crop", "stretch") -- used to build a specific
+        undo/redo status message instead of a generic one. Call this
+        BEFORE making the change, same as always; the label describes
+        the change about to happen, not the state being captured."""
+        self.undo_stack.append(self._snapshot(label))
         self.redo_stack.clear()
 
     def undo(self):
         if not self.undo_stack or self.data is None:
             return
-        self.redo_stack.append(self._snapshot())
-        self._restore(self.undo_stack.pop())
-        self.status_var.set("Undid last change.")
+        entry = self.undo_stack.pop()
+        label = entry.get("label", "change")
+        self.redo_stack.append(self._snapshot(label))
+        self._restore(entry)
+        self.status_var.set(f"Undid {label}.")
 
     def redo(self):
         if not self.redo_stack or self.data is None:
             return
-        self.undo_stack.append(self._snapshot())
-        self._restore(self.redo_stack.pop())
-        self.status_var.set("Redid change.")
+        entry = self.redo_stack.pop()
+        label = entry.get("label", "change")
+        self.undo_stack.append(self._snapshot(label))
+        self._restore(entry)
+        self.status_var.set(f"Redid {label}.")
 
     # ---------------- waveform canvas ----------------
 
@@ -4228,7 +4300,8 @@ class LoopCrossfadeGUI:
         if other_edge_sample is not None:
             preferred_direction = self._local_slope_direction(self.data, self.sr, other_edge_sample)
         return self._nearest_zero_crossing_directional(self.data, self.sr, sample, window,
-                                                         preferred_direction=preferred_direction)
+                                                         preferred_direction=preferred_direction,
+                                                         hard_cap_seconds=window / self.sr)
 
     def _on_canvas_drag(self, event):
         if self.data is None or self.drag_mode is None:
@@ -4405,6 +4478,17 @@ class LoopCrossfadeGUI:
             w_px = max(1, self.canvas.winfo_width() or self.canvas_width)
             per_pixel = max(1, (ve - vs) / w_px)
             zc_cap = max(1, min(int(per_pixel * 10), int(self.sr * 0.25)))
+            # this zc_cap is ALSO passed below as hard_cap_seconds, not just
+            # as the starting search window -- _nearest_zero_crossing_
+            # directional's own progressive widening otherwise falls back
+            # to its default 2-second hard_cap_seconds regardless of this
+            # cap, which let a directional-match search wander far past
+            # what "capped at a quarter-second" actually promises. Most
+            # noticeable clicking near the very start/end of a file: fewer
+            # candidate crossings there (often quiet or fading), and the
+            # search can only extend in ONE direction at the boundary, so
+            # it widened all the way out (confirmed: ~530ms) chasing a
+            # direction-matched crossing instead of landing near the click.
             # while actively playing, prefer a landing point that continues
             # in the SAME direction the waveform was already moving right
             # before the click -- reduces the tick further than amplitude-
@@ -4427,14 +4511,15 @@ class LoopCrossfadeGUI:
                 preview_cursor = self._raw_to_preview_cursor(samp)
                 preview_cursor = self._nearest_zero_crossing_directional(
                     self.player.data, self.player.sr, preview_cursor, zc_cap,
-                    preferred_direction=outgoing_direction)
+                    preferred_direction=outgoing_direction, hard_cap_seconds=zc_cap / self.player.sr)
                 self.player.set_cursor(preview_cursor)
             else:
                 # clicking outside the loop region: always operate on raw
                 # audio, so you can freely check surrounding context
                 self._exit_preview_mode()
                 snapped = self._nearest_zero_crossing_directional(
-                    self.data, self.sr, samp, zc_cap, preferred_direction=outgoing_direction)
+                    self.data, self.sr, samp, zc_cap, preferred_direction=outgoing_direction,
+                    hard_cap_seconds=zc_cap / self.sr)
                 self.player.set_cursor(snapped)
             self._show_click_flag(event.x, samp)
             self._redraw()
@@ -4445,6 +4530,7 @@ class LoopCrossfadeGUI:
                 self.undo_stack.append({
                     "data": self.data, "sel_start": old_start, "sel_end": old_end,
                     "cropped": self.cropped, "zoom_start": self.zoom_start, "zoom_end": self.zoom_end,
+                    "label": "selection change",
                 })
                 self.redo_stack.clear()
                 if self.preview_mode:
@@ -4553,6 +4639,38 @@ class LoopCrossfadeGUI:
             self._stop_loop_animation()
         self._refresh_repeat_icon()
 
+    @property
+    def preview_mode(self):
+        return self._preview_mode
+
+    @preview_mode.setter
+    def preview_mode(self, value):
+        self._preview_mode = value
+        self._refresh_process_button_label()
+
+    def _refresh_process_button_label(self):
+        """Keeps the Process & Save button's own label in sync with
+        whichever export mode it would currently use if pressed --
+        mirrors run_process()'s own mode logic exactly (LOOP/preview_mode
+        wins if both preview_mode and REPEAT are somehow set), so the
+        button always states what pressing it would actually do rather
+        than a static, generic label. Runs on every preview_mode
+        assignment (via the property setter above) automatically, so
+        every code path that ends preview mode -- Stop, Crop, loading a
+        new file, etc. -- refreshes this without each one needing its own
+        explicit call. repeat_var gets the same live behavior via its own
+        trace_add, set up alongside the other StringVar bindings."""
+        if not hasattr(self, "process_btn_var"):
+            return  # not built yet -- preview_mode's own __init__
+                     # assignment bypasses this property entirely (see
+                     # its comment), but this guard stays as a safety net
+        if self.preview_mode:
+            self.process_btn_var.set("Process & Save: Crossfaded")
+        elif self.repeat_var.get():
+            self.process_btn_var.set("Process & Save: Declicked")
+        else:
+            self.process_btn_var.set("Process & Save: Unprocessed")
+
     def _exit_preview_mode(self):
         """Swap the player back to raw (un-processed) audio -- used whenever
         something invalidates a processed preview that's currently loaded."""
@@ -4621,7 +4739,29 @@ class LoopCrossfadeGUI:
         self._redraw()
 
     def on_repeat_toggle(self):
-        self.repeat_var.set(not self.repeat_var.get())
+        new_value = not self.repeat_var.get()
+        if new_value and self.preview_mode:
+            # REPEAT and LOOP are mutually exclusive -- turning REPEAT on
+            # while LOOP/Audition is active needs to turn LOOP off and
+            # switch back to the raw selection, the same way pressing
+            # Loop while REPEAT is active already correctly does the
+            # reverse (on_loop_preview builds a whole new playback setup
+            # from scratch, which naturally overwrites REPEAT's state;
+            # this path never did the equivalent, so REPEAT silently
+            # never actually took effect while LOOP was running).
+            # repeat_var is set BEFORE exiting preview mode specifically
+            # because _exit_preview_mode's own hot-swap-while-playing
+            # path reads the CURRENT repeat_var value to decide the loop
+            # state it restores -- it needs to already see the new value.
+            self.repeat_var.set(new_value)
+            self._exit_preview_mode()
+        else:
+            self.repeat_var.set(new_value)
+        # Always applied explicitly, not left to _exit_preview_mode alone:
+        # that method only calls set_loop on its hot-swap-while-playing
+        # branch, not its stop+load branch (player wasn't playing) or the
+        # plain non-preview toggle path below -- this covers all of them
+        # with one idempotent call.
         self.player.set_loop(self.repeat_var.get(), declick_wrap=True)
         self._refresh_repeat_icon()
 
@@ -4704,6 +4844,11 @@ class LoopCrossfadeGUI:
             self.player.stop()
             self._set_play_pause_icon(False)
             self.status_var.set("Stopped auditioning.")
+            self._update_auto_crossfade_preview()  # otherwise the live value under
+                                                     # Auto-detect is left showing
+                                                     # whatever it last was mid-audition
+                                                     # until some OTHER change happens
+                                                     # to trigger a refresh
             self._redraw()
             return
 
@@ -4741,6 +4886,17 @@ class LoopCrossfadeGUI:
             self._refresh_loop_and_repeat_icons()
             self._set_play_pause_icon(True)
 
+            # _update_auto_crossfade_preview (the usual source of this
+            # live value, shown directly under the Auto-detect checkbox)
+            # deliberately blanks it while preview_mode is active, and
+            # _on_param_changed routes live updates here instead of there
+            # once auditioning -- so without this, the value visibly
+            # disappeared the moment LOOP was enabled, even though it's
+            # computed right here as used_xfade and was already being
+            # shown in the status message below.
+            if self.auto_xfade_var.get():
+                self.auto_xfade_value_var.set(f"\u2248 {used_xfade * 1000:.0f} ms")
+
             dur = preview.shape[0] / self.sr
             self.status_var.set(
                 f"Looping the processed preview ({dur:.2f}s, crossfade {used_xfade*1000:.0f} ms, "
@@ -4759,7 +4915,7 @@ class LoopCrossfadeGUI:
         if e <= s:
             self.messagebox.showerror("FermaLoop", "Select a region on the waveform first.")
             return
-        self.push_undo()
+        self.push_undo("crop")
         self.player.stop()
         self.data = self.data[s:e]
         self.sel_start, self.sel_end = 0, len(self.data)
@@ -4870,7 +5026,7 @@ class LoopCrossfadeGUI:
                 stretched = paulstretch(segment, self.sr, factor, window_seconds)
                 elapsed = time.time() - t0
 
-                self.push_undo()
+                self.push_undo("stretch")
                 self.player.stop()
                 self.data = np.concatenate([self.data[:s], stretched, self.data[e:]], axis=0)
                 self.sel_start = s
