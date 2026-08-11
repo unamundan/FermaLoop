@@ -3099,6 +3099,10 @@ class LoopCrossfadeGUI:
         self._canvas_resize_after_id = None  # debounce state for the waveform's
                                                # own resize handler, see
                                                # _on_canvas_resize below
+        self._was_playing_last_poll = False  # lets _poll_playhead reliably detect
+                                              # playback ending ON ITS OWN (e.g. RAW/
+                                              # non-looped playback reaching the end of
+                                              # the file) -- see _poll_playhead itself
         self.drag_mode = None      # None | "start" | "end" | "new" | "pending"
         self.drag_anchor_x = None
         self.pre_drag_selection = None
@@ -3131,6 +3135,10 @@ class LoopCrossfadeGUI:
                                     # so Crop-after-LOOP would have silently exported
                                     # UNPROCESSED audio, not just mislabeled a filename.
         self._wave_photo = None    # keep a reference so PIL's PhotoImage isn't garbage collected
+        self._last_loop_dur = 0.0       # duration/crossfade of the most recently computed
+        self._last_loop_xfade_ms = 0.0  # LOOP preview -- lets a RESUMED (not just freshly
+                                          # computed) preview still show accurate specifics
+                                          # in its status message; see _status_for_now_playing
         self._icon_cache = {}      # keeps icon PhotoImage references alive too
         self._loop_anim_after_id = None
         self._loop_anim_frames = None
@@ -4916,6 +4924,34 @@ class LoopCrossfadeGUI:
         btn.configure(style="IconFlash.TButton")
         self.root.after(duration_ms, lambda: btn.configure(style="Icon.TButton"))
 
+    def _status_for_now_playing(self):
+        """The status message for "audio is now playing", for whichever
+        mode is currently active -- single source of truth, meant to be
+        called from every place that STARTS or RESUMES playback, so none
+        of them can drift out of sync or simply forget to set one. That
+        was exactly the reported bug: resuming via Space after Stop left
+        the OLD "Stopped." message on screen indefinitely, since nothing
+        on that resume path had ever touched the status bar at all --
+        along with several sibling cases in the same shape (Pause showing
+        nothing, live-switching REPEAT while playing never updating it).
+
+        Deliberately does NOT say "click X again to stop" for REPEAT/LOOP
+        -- that isn't what pressing them again actually does anymore (see
+        export_mode's own comment in __init__): they only ever SWITCH the
+        mode live, while playback continues; Space/Stop are the only
+        things that actually stop audio. Reported directly as misleading
+        -- clicking LOOP again while playing doesn't stop anything, it
+        disables LOOP and playback continues, unlooped, past the
+        selection end."""
+        if self.export_mode == "loop" and self.preview_mode:
+            return (f"LOOPING with crossfaded edges ({self._last_loop_dur:.2f}s, crossfade "
+                    f"{self._last_loop_xfade_ms:.0f} ms). Click within the selection to scrub, "
+                    f"or click LOOP again to switch off.")
+        elif self.export_mode == "repeat":
+            return "REPEATING with declicked edges. Click REPEAT again to switch off."
+        else:
+            return "Playing."
+
     def on_play_pause(self):
         if self.data is None:
             return
@@ -4938,6 +4974,9 @@ class LoopCrossfadeGUI:
                                                      # so pausing needs to drop it back
                                                      # to accent+static -- nothing else
                                                      # re-checks player.playing on its own
+            self.status_var.set("Paused.")  # previously never set at all -- reported
+                                             # directly ("tapping PAUSE... doesn't
+                                             # display a PAUSED system message")
         else:
             if self.preview_mode:
                 # already has a valid loop preview buffer loaded, just
@@ -4952,8 +4991,9 @@ class LoopCrossfadeGUI:
                 # the exact same computation on_loop_preview itself runs.
                 self._compute_and_play_loop_preview()
                 return  # _compute_and_play_loop_preview sets its own
-                         # play/pause icon state and handles its own
-                         # failure cases; nothing further to do here
+                         # play/pause icon state, status message, and
+                         # handles its own failure cases; nothing further
+                         # to do here
             else:
                 self.player.set_selection(self.sel_start, self.sel_end)
                 self.player.set_loop(self.export_mode == "repeat", declick_wrap=True)
@@ -4968,6 +5008,13 @@ class LoopCrossfadeGUI:
                                                      # preview left the icon stuck
                                                      # static even though audio (and
                                                      # player.playing) had resumed.
+            self.status_var.set(self._status_for_now_playing())  # previously never set on
+                                                                   # either the resume-from-
+                                                                   # pause path or the fresh-
+                                                                   # start path -- reported
+                                                                   # directly: resuming after
+                                                                   # Stop left "Stopped." on
+                                                                   # screen indefinitely
 
     def on_stop(self):
         self._flash_button(self.btn_stop)
@@ -5033,11 +5080,16 @@ class LoopCrossfadeGUI:
         # cases -- reported directly: the message stayed on whatever
         # LOOP had last set (with its own now-fixed stale wording),
         # regardless of switching to REPEAT, or turning either off.
-        # Mirrors on_loop_preview's own wording exactly for the parallel
-        # cases (armed/turned-off), for consistency.
+        # Uses the same centralized _status_for_now_playing helper as
+        # Play/Space now does, rather than its own hardcoded copy of the
+        # "REPEATING with declicked edges..." string -- keeps the wording
+        # from being able to drift between the two call sites again, and
+        # fixes the same "...to stop" inaccuracy this string used to have
+        # (pressing REPEAT again while playing doesn't stop anything, it
+        # switches to raw playback while audio keeps going).
         if new_value:
             if self.player.playing:
-                self.status_var.set("Looping with declicked edges. Click REPEAT again to stop.")
+                self.status_var.set(self._status_for_now_playing())
             else:
                 self.status_var.set("REPEAT armed. Press Space to preview, or Save to export.")
         else:
@@ -5262,10 +5314,16 @@ class LoopCrossfadeGUI:
                 self.auto_xfade_value_var.set(f"\u2248 {used_xfade * 1000:.0f} ms")
 
             dur = preview.shape[0] / self.sr
+            self._last_loop_dur = dur              # so a later RESUME (Space after
+            self._last_loop_xfade_ms = used_xfade * 1000  # Pause/Stop) can still show
+                                                             # accurate specifics via
+                                                             # _status_for_now_playing,
+                                                             # without a stale "just
+                                                             # computed" claim
             self.status_var.set(
-                f"Looping the processed preview ({dur:.2f}s, crossfade {used_xfade*1000:.0f} ms, "
+                f"LOOPING with crossfaded edges ({dur:.2f}s, crossfade {used_xfade*1000:.0f} ms, "
                 f"computed in {elapsed*1000:.0f} ms). Click within the selection to scrub, adjust "
-                f"settings to update live, or click LOOP again to stop."
+                f"settings to update live, or click LOOP again to switch off."
             )
         except Exception as e:
             self.status_var.set("Audition failed.")
@@ -5307,6 +5365,14 @@ class LoopCrossfadeGUI:
         self._exit_preview_mode()
         self.player.stop()
         self._set_play_pause_icon(False)
+        self.status_var.set("Preparing to stretch...")  # without this, the status bar
+                                                          # could still read a stale
+                                                          # "now playing" message while
+                                                          # this (modal) dialog is open --
+                                                          # and _poll_playhead's own
+                                                          # natural-end detection looks
+                                                          # for exactly that wording to
+                                                          # decide whether IT should react
         self._redraw()
 
         tk, ttk = self.tk, self.ttk
@@ -5407,7 +5473,7 @@ class LoopCrossfadeGUI:
                 out_dur = stretched.shape[0] / self.sr
                 self.status_var.set(
                     f"Stretched {sel_dur:.2f}s to {out_dur:.2f}s ({factor:.1f}x) in {elapsed:.1f}s. "
-                    f"(Cmd/Ctrl+Z to undo.) Audition or Crop to build the loop."
+                    f"(Cmd/Ctrl+Z to undo.) LOOP or Crop to build the loop."
                 )
                 close_dialog()
             except Exception as ex:
@@ -5484,12 +5550,57 @@ class LoopCrossfadeGUI:
         dlg.after(50, lambda: factor_entry.entry.focus_force() if dlg.winfo_exists() else None)
 
     def _poll_playhead(self):
-        if self.data is not None and self.player.playing:
+        is_playing = self.data is not None and self.player.playing
+        if is_playing:
             self._redraw()
             display_samp = self._display_cursor_sample()
             self.time_var.set(format_time(display_samp / self.sr))
-            if not self.player.playing:
+        if self._was_playing_last_poll and not is_playing:
+            # Playback stopped ON ITS OWN since the last poll -- most
+            # notably, RAW (non-looped) playback reaching the natural
+            # end of the file via the audio callback's own CallbackStop,
+            # rather than through Pause, Stop, or either toggle handler.
+            # REPEAT and LOOP both loop indefinitely and so never hit
+            # this on their own; this is specifically the RAW case.
+            # Nothing else in the app catches this transition at all --
+            # none of the status-message/icon fixes elsewhere apply,
+            # since none of THEIR call sites ever run here. Before this,
+            # the play/pause icon and status message would silently
+            # freeze on "now playing" indefinitely once audio actually
+            # finished on its own. The OLD version of this check lived
+            # entirely inside the `if is_playing:` block above, gated on
+            # player.playing already being True at the TOP of this same
+            # tick -- which only catches the narrow case where playback
+            # ends in the handful of milliseconds between reading that
+            # flag and reaching this line. In practice playback almost
+            # always finishes BETWEEN two 50ms poll ticks, not during
+            # one, so that version essentially never fired; tracking the
+            # previous tick's state explicitly is what actually makes
+            # this reliable.
+            #
+            # Only overwrites the status message if it STILL looks like
+            # one of the "now playing" messages -- i.e. nothing has
+            # ALREADY reacted to this same transition with its own, more
+            # specific message (Stop's "Stopped.", Pause's "Paused.",
+            # either toggle's "Switched to..."/"...turned off."). Player.
+            # playing also flips to False when the user explicitly
+            # stops/pauses, not just on a natural end -- and those
+            # explicit actions run synchronously, fully finishing
+            # (including setting their own status message) before this
+            # scheduled poll tick gets a chance to run at all. Checking
+            # the message's own CURRENT content, rather than a separate
+            # flag every explicit stop-causing action would need to
+            # remember to set, is what keeps this from stomping a
+            # message an explicit action already set correctly for the
+            # exact same transition -- and stays correct automatically
+            # for any future stop-causing action too, without needing
+            # its own update here.
+            current = self.status_var.get()
+            if current.startswith(("LOOPING", "REPEATING", "Playing.")):
                 self._set_play_pause_icon(False)
+                self._refresh_loop_and_repeat_icons()
+                self.status_var.set("Finished playing.")
+        self._was_playing_last_poll = is_playing
         self.root.after(50, self._poll_playhead)
 
     # ---------------- keyboard shortcuts ----------------
