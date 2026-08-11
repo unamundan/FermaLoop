@@ -1271,22 +1271,6 @@ class AudioPlayer:
                     self.cursor = self.play_start
                     remaining = self.play_end - self.cursor
                 else:
-                    # TEMPORARY diagnostic, same log file/pattern as the
-                    # underrun logging above and _log_repeat_toggle in the
-                    # GUI class -- confirms/rules out whether THIS is the
-                    # exact moment playback unexpectedly stops when
-                    # switching LOOP->REPEAT mid-playback (i.e. play_loop
-                    # was False here when it should have been True).
-                    try:
-                        import datetime
-                        log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
-                        with open(log_path, "a") as f:
-                            f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
-                                    f"_callback: STOPPING (play_loop=False) at cursor={self.cursor}, "
-                                    f"play_start={self.play_start}, play_end={self.play_end}, "
-                                    f"loop={self.loop}, declick_loop_wrap={self.declick_loop_wrap}\n")
-                    except Exception:
-                        pass
                     outdata[write_offset:] = 0
                     self.playing = False
                     raise _sd.CallbackStop
@@ -3543,43 +3527,54 @@ class LoopCrossfadeGUI:
             self._icon_cache[key] = frames
         return self._icon_cache[key]
 
-    def _start_loop_animation(self):
-        if self._loop_anim_after_id is not None:
-            return  # already running
-        self._loop_anim_frames = self._get_loop_animation_frames()
-        self._loop_anim_index = 0
-        self._animate_loop_icon()
-
-    def _animate_loop_icon(self):
-        if not self.preview_mode or self._loop_anim_frames is None:
-            self._loop_anim_after_id = None
+    def _refresh_loop_icon(self):
+        """Three distinct visual states for the Loop button, not two:
+        grey/static (LOOP isn't the current export mode), accent/static
+        (LOOP IS the export mode, but nothing is actively producing that
+        audio right now -- e.g. right after Crop, or simply armed but
+        not yet started), and accent/spinning (LOOP is both the export
+        mode AND genuinely playing right now). Confirmed directly: after
+        Crop, the icon should stay accent-colored (mode still selected)
+        but stop spinning (audio genuinely isn't playing anymore),
+        rather than reverting all the way to plain grey the way it did
+        when this was driven by preview_mode alone -- preview_mode
+        tracks whether the player is HOLDING a live buffer, export_mode
+        tracks what the user actually chose, and those aren't always
+        the same thing anymore (see export_mode's own comment)."""
+        is_spinning = self.preview_mode and self.player.playing
+        if is_spinning:
+            if self._loop_anim_after_id is None:
+                self._loop_anim_frames = self._get_loop_animation_frames()
+                self._loop_anim_index = 0
+                self._animate_loop_icon()
             return
-        self.btn_loop.configure(image=self._loop_anim_frames[self._loop_anim_index])
-        self._loop_anim_index = (self._loop_anim_index + 1) % len(self._loop_anim_frames)
-        self._loop_anim_after_id = self.root.after(90, self._animate_loop_icon)
-
-    def _stop_loop_animation(self):
         if self._loop_anim_after_id is not None:
             try:
                 self.root.after_cancel(self._loop_anim_after_id)
             except Exception:
                 pass
             self._loop_anim_after_id = None
-        icon = self._get_icon("loop", self.ICON_SIZE, FG)
+        color = ACCENT if self.export_mode == "loop" else FG
+        icon = self._get_icon("loop", self.ICON_SIZE, color)
         if icon is not None:
             self.btn_loop.configure(image=icon)
 
+    def _animate_loop_icon(self):
+        if not (self.preview_mode and self.player.playing) or self._loop_anim_frames is None:
+            self._loop_anim_after_id = None
+            return
+        self.btn_loop.configure(image=self._loop_anim_frames[self._loop_anim_index])
+        self._loop_anim_index = (self._loop_anim_index + 1) % len(self._loop_anim_frames)
+        self._loop_anim_after_id = self.root.after(90, self._animate_loop_icon)
+
     def _refresh_repeat_icon(self):
-        """Repeat's displayed color reflects its own state, EXCEPT while the
-        Loop crossfade-preview is actively playing -- Loop supersedes plain
-        Repeat (it loops too, plus applies the crossfade), so Repeat's own
-        color is visually suppressed to grey for the duration without
-        actually changing its stored value."""
-        if self.preview_mode:
-            icon = self._get_icon("repeat", self.ICON_SIZE, FG)
-        else:
-            color = ACCENT if self.repeat_var.get() else FG
-            icon = self._get_icon("repeat", self.ICON_SIZE, color)
+        """Repeat's displayed color reflects export_mode now, not
+        preview_mode/repeat_var directly -- accent when REPEAT is the
+        chosen export mode, grey otherwise (including while LOOP is
+        chosen instead, the same "suppressed in favor of LOOP" behavior
+        as before, just keyed off the more durable value)."""
+        color = ACCENT if self.export_mode == "repeat" else FG
+        icon = self._get_icon("repeat", self.ICON_SIZE, color)
         if icon is not None:
             self.btn_repeat.configure(image=icon)
 
@@ -3913,16 +3908,15 @@ class LoopCrossfadeGUI:
                    command=self.run_process, takefocus=0)
         self.process_btn_var = tk.StringVar(value="Save Unprocessed")
         btn_process.configure(textvariable=self.process_btn_var)
-        self._refresh_process_button_label()  # repeat_var's own trace_add only fires on
-                                                # FUTURE changes, and preview_mode's initial
-                                                # __init__ assignment deliberately bypassed
-                                                # the property setter (see its comment) -- so
-                                                # without this explicit call here, the button
-                                                # would show its StringVar's hardcoded default
-                                                # above rather than a value actually computed
-                                                # from current state
+        self._process_btn_tooltip = ToolTip(btn_process, "")
+        self._refresh_process_button_label()  # export_mode is only ever set via
+                                                # _set_export_mode, which this button
+                                                # doesn't exist yet to be refreshed BY
+                                                # at __init__ time -- this explicit call
+                                                # is what gives it its real starting
+                                                # label/tooltip instead of the StringVar's
+                                                # hardcoded default and an empty tooltip
         btn_process.pack(fill="x", pady=(8, 8))
-        ToolTip(btn_process, "Crossfade the current selection and save it to the 'Save as' path")
 
         # wraplength is deliberately NOT a fixed value here: Tk labels
         # with a hardcoded wraplength can reserve that much width up
@@ -4772,14 +4766,10 @@ class LoopCrossfadeGUI:
     # ---------------- transport ----------------
 
     def _refresh_loop_and_repeat_icons(self):
-        """Keeps the Loop button's animation state and the Repeat button's
-        suppressed/normal color in sync with self.preview_mode. Loop's
-        button background never changes -- only its icon (grey static vs
-        blue animated) communicates state, matching the confirmed design."""
-        if self.preview_mode:
-            self._start_loop_animation()
-        else:
-            self._stop_loop_animation()
+        """Keeps both transport icons in sync with current state --
+        Loop's now has three visual states (see _refresh_loop_icon),
+        Repeat's reflects export_mode (see _refresh_repeat_icon)."""
+        self._refresh_loop_icon()
         self._refresh_repeat_icon()
 
     @property
@@ -4808,25 +4798,36 @@ class LoopCrossfadeGUI:
         self._update_save_as_suffix()
 
     def _refresh_process_button_label(self):
-        """Keeps the Process & Save button's own label in sync with
-        export_mode -- mirrors run_process()'s own mode logic exactly,
-        so the button always states what pressing it would actually do.
-        Called from _set_export_mode, the sole place export_mode
-        changes, rather than from a property setter that would also
-        fire for reasons unrelated to the user's export choice."""
+        """Keeps the Process & Save button's own label AND hover tooltip
+        in sync with export_mode -- mirrors run_process()'s own mode
+        logic exactly, so both always state what pressing the button
+        would actually do. Called from _set_export_mode, the sole place
+        export_mode changes, rather than from a property setter that
+        would also fire for reasons unrelated to the user's export
+        choice."""
         if not hasattr(self, "process_btn_var"):
             return  # not built yet -- _set_export_mode isn't called
                      # this early, but this guard stays as a safety net
         if self.export_mode == "loop":
             self.process_btn_var.set("Save Crossfaded")
+            self._process_btn_tooltip.text = ("Crossfade the current selection "
+                                                "and save it to the 'Save as' path")
         elif self.export_mode == "repeat":
             self.process_btn_var.set("Save Declicked")
+            # Was previously a static tooltip always reading "Crossfade the
+            # current selection...", regardless of mode -- correct for
+            # LOOP, but wrong for REPEAT, which declicks rather than
+            # crossfades. Reported directly.
+            self._process_btn_tooltip.text = ("Declick selection edges "
+                                                "and save it to the 'Save as' path")
         else:
             # All three labels drop "Process &" uniformly. "Save" alone
             # is accurate for all three: something is always being
             # saved, and REPEAT/LOOP's own transform is already named
             # by the word that follows it.
             self.process_btn_var.set("Save Unprocessed")
+            self._process_btn_tooltip.text = ("Save the current selection as-is "
+                                                "to the 'Save as' path")
 
     def _mode_suffix(self):
         """The Save As filename suffix for export_mode -- deliberately
@@ -4932,59 +4933,49 @@ class LoopCrossfadeGUI:
             # instead of pausing it.
             self.player.pause()
             self._set_play_pause_icon(False)
+            self._refresh_loop_and_repeat_icons()  # LOOP's icon can now be spinning
+                                                     # (accent+animated) while playing,
+                                                     # so pausing needs to drop it back
+                                                     # to accent+static -- nothing else
+                                                     # re-checks player.playing on its own
         else:
-            if not self.preview_mode:
-                # only touch selection/loop when starting fresh RAW playback;
-                # while a processed Loop preview is paused, resuming it must
-                # reuse the player's own (already-correct) internal bounds,
-                # not overwrite them with raw file-space selection indices
+            if self.preview_mode:
+                # already has a valid loop preview buffer loaded, just
+                # paused -- resume it directly, reusing the player's own
+                # (already-correct) internal bounds rather than
+                # overwriting them with raw file-space selection indices
+                self.player.play()
+            elif self.export_mode == "loop":
+                # LOOP is the armed mode (e.g. via a fresh L press, or
+                # simply left over from before), but nothing's actually
+                # been computed yet -- compute it now and start playing,
+                # the exact same computation on_loop_preview itself runs.
+                self._compute_and_play_loop_preview()
+                return  # _compute_and_play_loop_preview sets its own
+                         # play/pause icon state and handles its own
+                         # failure cases; nothing further to do here
+            else:
                 self.player.set_selection(self.sel_start, self.sel_end)
-                self.player.set_loop(self.repeat_var.get(), declick_wrap=True)
-            self.player.play()
+                self.player.set_loop(self.export_mode == "repeat", declick_wrap=True)
+                self.player.play()
             self._set_play_pause_icon(True)
 
     def on_stop(self):
         self._flash_button(self.btn_stop)
         self.player.stop()
         self._set_play_pause_icon(False)
+        self._refresh_loop_and_repeat_icons()  # same reasoning as the pause branch
+                                                 # above -- Stop also changes
+                                                 # player.playing, which the icon's
+                                                 # spinning state now depends on
         self._redraw()
 
     def on_rewind(self):
         self.player.rewind()
         self._redraw()
 
-    def _log_repeat_toggle(self, label):
-        """TEMPORARY diagnostic, matching the existing pattern in
-        AudioPlayer._callback (same log file) -- toggling REPEAT while
-        LOOP is actively playing still needs a double-tap to actually
-        take effect, despite _exit_preview_mode's hot-swap path
-        confirming correct end-state in isolated, single-threaded
-        testing. That gap between isolated-test-correct and live-app-
-        broken points at something timing/concurrency-related between
-        this GUI-thread toggle and the separate audio callback thread --
-        logging the actual state at each step, across a real run, should
-        show what an isolated test can't. Safe to remove once the actual
-        mechanism is identified."""
-        try:
-            import datetime
-            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
-            with open(log_path, "a") as f:
-                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] {label}: "
-                        f"preview_mode={self.preview_mode}, repeat_var={self.repeat_var.get()}, "
-                        f"player.playing={self.player.playing}, player.loop={self.player.loop}, "
-                        f"player.play_loop={self.player.play_loop}, "
-                        f"player.declick_loop_wrap={self.player.declick_loop_wrap}, "
-                        f"player.cursor={self.player.cursor}, "
-                        f"player.sel_start={self.player.sel_start}, player.sel_end={self.player.sel_end}, "
-                        f"player.play_start={self.player.play_start}, player.play_end={self.player.play_end}, "
-                        f"gui.sel_start={self.sel_start}, gui.sel_end={self.sel_end}\n")
-        except Exception:
-            pass
-
     def on_repeat_toggle(self):
-        self._log_repeat_toggle("on_repeat_toggle: ENTRY")
         new_value = not self.repeat_var.get()
-        was_playing = self.player.playing
         if new_value and self.preview_mode:
             # REPEAT and LOOP are mutually exclusive -- turning REPEAT on
             # while LOOP/Audition is active needs to turn LOOP off and
@@ -5000,7 +4991,6 @@ class LoopCrossfadeGUI:
             # state it restores -- it needs to already see the new value.
             self.repeat_var.set(new_value)
             self._exit_preview_mode()
-            self._log_repeat_toggle("on_repeat_toggle: after _exit_preview_mode")
         else:
             self.repeat_var.set(new_value)
         # Always applied explicitly, not left to _exit_preview_mode alone:
@@ -5010,20 +5000,17 @@ class LoopCrossfadeGUI:
         # with one idempotent call.
         self.player.set_loop(self.repeat_var.get(), declick_wrap=True)
         self._set_export_mode("repeat" if new_value else "raw")
-        if new_value and not was_playing:
-            # Turning REPEAT on from a fully stopped state didn't
-            # actually start playback -- on_loop_preview's own
-            # equivalent path explicitly calls play() when nothing was
-            # already running; this path never did, so tapping L played
-            # immediately but tapping R only armed the state, silently
-            # requiring a separate Play press to hear anything (reported
-            # directly: "playback is not automatically begun").
-            self.player.set_selection(self.sel_start, self.sel_end)
-            self.player.set_cursor(self.sel_start)
-            self.player.play()
-            self._set_play_pause_icon(True)
+        # No auto-play from a stopped state anymore -- R/L now only ever
+        # affect ALREADY-playing audio (live-switch, above), never start
+        # playback on their own. That auto-play was added a few rounds
+        # back specifically to match L's own behavior; it's removed here
+        # symmetrically now that L no longer does that either (see
+        # on_loop_preview) -- "enabling a state and choosing when to
+        # begin playback" was the explicit direction: R/L arm export_mode
+        # for Space or Save to act on, rather than forcing playback on
+        # every press, which could otherwise interrupt someone who just
+        # wants to pick a mode and Save immediately.
         self._refresh_repeat_icon()
-        self._log_repeat_toggle("on_repeat_toggle: EXIT")
 
     def _read_process_params(self, silent=False):
         """Validates and returns (xfade_seconds_or_None, curve, snap, window)
@@ -5095,18 +5082,36 @@ class LoopCrossfadeGUI:
         `silent=True` is used for automatic live re-audition (selection or
         parameter changes while already auditioning) -- it never toggles
         off, skips dialogs, and quietly does nothing if the current state
-        isn't ready to process."""
+        isn't ready to process.
+
+        A direct press does NOT force playback to start on its own
+        anymore -- see export_mode's own comment in __init__. If
+        something is ALREADY playing, this still live-switches it
+        immediately (unchanged, confirmed still wanted); if nothing is
+        playing, this only arms export_mode="loop" for Space or Save to
+        act on later, rather than forcing audio to start."""
         if self.data is None:
             return
 
         if self.preview_mode and not silent:
+            # Explicit L press while LOOP is the current mode: turn it
+            # off. _exit_preview_mode already does exactly the right
+            # thing for both cases -- hot-swaps to keep playing (now
+            # raw) if genuinely playing, or just resets internal state
+            # without starting anything if not -- so this no longer
+            # forces a stop afterward the way it used to. That
+            # unconditional stop() was the actual bug: it stopped
+            # playback even when the hot-swap just above had JUST
+            # successfully kept it running. L/R only ever change WHAT's
+            # playing now; Space/Stop are the only things that actually
+            # start or stop it.
             self._exit_preview_mode()
-            self.player.stop()
-            self._set_play_pause_icon(False)
-            self.status_var.set("Stopped auditioning.")
-            self._set_export_mode("raw")  # explicit user press turning LOOP off --
-                                           # matches on_repeat_toggle's own handling
-                                           # of an explicit REPEAT-off press
+            self._set_export_mode("raw")
+            if self.player.playing:
+                self.status_var.set("Switched to raw playback.")
+            else:
+                self._set_play_pause_icon(False)
+                self.status_var.set("Stopped auditioning.")
             self._update_auto_crossfade_preview()  # otherwise the live value under
                                                      # Auto-detect is left showing
                                                      # whatever it last was mid-audition
@@ -5115,6 +5120,37 @@ class LoopCrossfadeGUI:
             self._redraw()
             return
 
+        # A direct press while NOTHING is currently playing just arms
+        # export_mode="loop" without computing or starting anything --
+        # "enabling a state and choosing when to begin playback" was the
+        # explicit direction, rather than forcing playback on every
+        # press (which could otherwise interrupt someone who just wants
+        # to pick a mode and Save immediately). Checked before the
+        # sounddevice/playback-readiness checks below since arming
+        # doesn't actually need sound at all -- only an actual attempt
+        # to PLAY does. silent=True (live re-audition) always proceeds
+        # past this -- it only ever fires while ALREADY previewing.
+        if not silent and not self.player.playing:
+            if self.sel_end <= self.sel_start:
+                self.messagebox.showerror("FermaLoop", "Select a region on the waveform first.")
+                return
+            self._set_export_mode("loop")
+            self.repeat_var.set(False)
+            self._refresh_loop_and_repeat_icons()
+            self.status_var.set("LOOP armed. Press Space to preview, or Save to export.")
+            return
+
+        self._compute_and_play_loop_preview(silent=silent)
+
+    def _compute_and_play_loop_preview(self, silent=False):
+        """Computes the crossfaded preview for the current selection and
+        starts (or live-hot-swaps into) playing it looped. Split out from
+        on_loop_preview so on_play_pause can trigger this directly when
+        Space is pressed with export_mode=="loop" but nothing's been
+        computed yet -- calling on_loop_preview() itself from there
+        would hit ITS OWN "arm without playing" branch instead, since at
+        that exact moment self.player.playing is still False (Space
+        hasn't started anything yet)."""
         if not SOUNDDEVICE_AVAILABLE:
             if not silent:
                 self.messagebox.showinfo("FermaLoop", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
