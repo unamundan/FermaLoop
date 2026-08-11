@@ -3119,10 +3119,30 @@ class LoopCrossfadeGUI:
         self.redo_stack = []
         self._preview_mode = False  # backing field for the preview_mode property below;
                                      # True while the player holds a processed preview, not
-                                     # raw audio. Set directly here (not via self.preview_mode
-                                     # = ...) specifically because that property's setter
-                                     # calls _refresh_process_button_label(), which reads
-                                     # self.repeat_var -- not created until a few lines below.
+                                     # raw audio. The property setter is now a plain
+                                     # passthrough (see its own comment for why), so this
+                                     # direct assignment isn't strictly required anymore --
+                                     # left as-is since it's still correct and harmless.
+        self.export_mode = "raw"   # "loop" / "repeat" / "raw" -- the SOLE source of truth
+                                    # for what Process & Save actually does, the button
+                                    # label, and the filename suffix. Deliberately separate
+                                    # from preview_mode/repeat_var: those track LIVE
+                                    # playback state and can legitimately change for
+                                    # reasons that have nothing to do with the user's
+                                    # intended export mode (Crop and PaulXStretch both
+                                    # invalidate preview_mode, since they change the
+                                    # underlying data out from under any live preview
+                                    # buffer -- but neither one means "the user changed
+                                    # their mind about exporting as a LOOP"). Set ONLY by
+                                    # the two toggle handlers (on_repeat_toggle,
+                                    # on_loop_preview) and by load_file/unload_file --
+                                    # never by anything that merely edits audio, so it
+                                    # can't be reset by a call site that never had a
+                                    # reason to touch it in the first place. Confirmed
+                                    # this was a real, serious gap, not just cosmetic:
+                                    # run_process() used to read preview_mode directly,
+                                    # so Crop-after-LOOP would have silently exported
+                                    # UNPROCESSED audio, not just mislabeled a filename.
         self._wave_photo = None    # keep a reference so PIL's PhotoImage isn't garbage collected
         self._icon_cache = {}      # keeps icon PhotoImage references alive too
         self._loop_anim_after_id = None
@@ -3161,8 +3181,6 @@ class LoopCrossfadeGUI:
         self.snap_var = tk.BooleanVar(value=False)
         self.window_var = tk.StringVar(value="0.25")
         self.repeat_var = tk.BooleanVar(value=False)
-        self.repeat_var.trace_add("write", lambda *a: (self._refresh_process_button_label(),
-                                                          self._update_save_as_suffix()))
         self.status_var = tk.StringVar(value="")
         self.time_var = tk.StringVar(value="00:00:00.000")
         self.selection_duration_var = tk.StringVar(value="Selection: --")
@@ -4055,6 +4073,8 @@ class LoopCrossfadeGUI:
                                       # state category as the LOOP-entry fix above,
                                       # just for a different transition into "neither
                                       # mode active"
+        self._set_export_mode("raw")  # a fresh file also shouldn't inherit the
+                                       # PREVIOUS file's intended export mode
         self._refresh_loop_and_repeat_icons()
         self.undo_stack.clear()
         self.redo_stack.clear()
@@ -4274,8 +4294,13 @@ class LoopCrossfadeGUI:
         self.cropped = False
         self.undo_stack.clear()
         self.redo_stack.clear()
+        self.repeat_var.set(False)
+        self._set_export_mode("raw")  # nothing loaded, so no meaningful export mode
         self.in_path_var.set("")
         self.out_path_var.set("")
+        self._save_as_root = None  # so the NEXT load's fresh " RAW" default isn't
+                                    # mistaken for a leftover custom filename
+        self._save_as_user_customized = False
         self.time_var.set("00:00:00.000")
         self._update_selection_duration_label()
         self._update_auto_crossfade_preview()
@@ -4763,50 +4788,53 @@ class LoopCrossfadeGUI:
 
     @preview_mode.setter
     def preview_mode(self, value):
+        # Deliberately does NOT touch export_mode, the button label, or
+        # the filename suffix -- those track the user's INTENDED export
+        # choice (see export_mode's own comment in __init__), not
+        # whether the player happens to be holding a live preview buffer
+        # RIGHT NOW. Crop and PaulXStretch both flip preview_mode False
+        # as a side effect of invalidating that buffer; neither means
+        # the user changed their mind about exporting as a LOOP.
         self._preview_mode = value
+
+    def _set_export_mode(self, mode):
+        """The ONLY way export_mode should ever change -- called
+        exclusively from the two toggle handlers (on_repeat_toggle,
+        on_loop_preview) and from load_file/unload_file. Refreshes the
+        button label and Save As suffix together, since both derive
+        from this single value now."""
+        self.export_mode = mode
         self._refresh_process_button_label()
         self._update_save_as_suffix()
 
     def _refresh_process_button_label(self):
         """Keeps the Process & Save button's own label in sync with
-        whichever export mode it would currently use if pressed --
-        mirrors run_process()'s own mode logic exactly (LOOP/preview_mode
-        wins if both preview_mode and REPEAT are somehow set), so the
-        button always states what pressing it would actually do rather
-        than a static, generic label. Runs on every preview_mode
-        assignment (via the property setter above) automatically, so
-        every code path that ends preview mode -- Stop, Crop, loading a
-        new file, etc. -- refreshes this without each one needing its own
-        explicit call. repeat_var gets the same live behavior via its own
-        trace_add, set up alongside the other StringVar bindings."""
+        export_mode -- mirrors run_process()'s own mode logic exactly,
+        so the button always states what pressing it would actually do.
+        Called from _set_export_mode, the sole place export_mode
+        changes, rather than from a property setter that would also
+        fire for reasons unrelated to the user's export choice."""
         if not hasattr(self, "process_btn_var"):
-            return  # not built yet -- preview_mode's own __init__
-                     # assignment bypasses this property entirely (see
-                     # its comment), but this guard stays as a safety net
-        if self.preview_mode:
+            return  # not built yet -- _set_export_mode isn't called
+                     # this early, but this guard stays as a safety net
+        if self.export_mode == "loop":
             self.process_btn_var.set("Save Crossfaded")
-        elif self.repeat_var.get():
+        elif self.export_mode == "repeat":
             self.process_btn_var.set("Save Declicked")
         else:
-            # All three labels now drop "Process &" uniformly, rather than
-            # only this one -- that was the actual inconsistency worth
-            # fixing (two states saying "Process & Save: X" while this one
-            # alone said "Save X" read as more arbitrary than principled).
-            # "Save" alone is accurate for all three: something is always
-            # being saved, and REPEAT/LOOP's own transform is already
-            # named by the word that follows it.
+            # All three labels drop "Process &" uniformly. "Save" alone
+            # is accurate for all three: something is always being
+            # saved, and REPEAT/LOOP's own transform is already named
+            # by the word that follows it.
             self.process_btn_var.set("Save Unprocessed")
 
     def _mode_suffix(self):
-        """The Save As filename suffix for whichever mode is currently
-        active -- deliberately mirrors _refresh_process_button_label's
-        own mode logic (LOOP wins if somehow both are set) so the two
-        never disagree about what "the current mode" is. Per the user's
-        own confirmed spec: REPEAT always implies declicking, so it gets
-        its own name rather than "DECLICKED"."""
-        if self.preview_mode:
+        """The Save As filename suffix for export_mode -- deliberately
+        mirrors _refresh_process_button_label's own source of truth so
+        the two never disagree about what "the current mode" is."""
+        if self.export_mode == "loop":
             return " LOOP"
-        elif self.repeat_var.get():
+        elif self.export_mode == "repeat":
             return " REPEAT"
         else:
             return " RAW"
@@ -4981,6 +5009,7 @@ class LoopCrossfadeGUI:
         # plain non-preview toggle path below -- this covers all of them
         # with one idempotent call.
         self.player.set_loop(self.repeat_var.get(), declick_wrap=True)
+        self._set_export_mode("repeat" if new_value else "raw")
         if new_value and not was_playing:
             # Turning REPEAT on from a fully stopped state didn't
             # actually start playback -- on_loop_preview's own
@@ -5075,6 +5104,9 @@ class LoopCrossfadeGUI:
             self.player.stop()
             self._set_play_pause_icon(False)
             self.status_var.set("Stopped auditioning.")
+            self._set_export_mode("raw")  # explicit user press turning LOOP off --
+                                           # matches on_repeat_toggle's own handling
+                                           # of an explicit REPEAT-off press
             self._update_auto_crossfade_preview()  # otherwise the live value under
                                                      # Auto-detect is left showing
                                                      # whatever it last was mid-audition
@@ -5128,6 +5160,11 @@ class LoopCrossfadeGUI:
             # preview_mode at all. This is the actual root cause; that
             # logic in on_repeat_toggle was correct all along.
             self.repeat_var.set(False)
+            self._set_export_mode("loop")  # explicit user action (a fresh L press,
+                                            # since silent=True re-audition only runs
+                                            # while ALREADY in preview mode, when
+                                            # export_mode is already "loop") -- LOOP
+                                            # is now the user's intended export choice
             self._refresh_loop_and_repeat_icons()
             self._set_play_pause_icon(True)
 
@@ -5669,17 +5706,25 @@ class LoopCrossfadeGUI:
             # save straight from a selection" work without cropping first
             segment = self.data[self.sel_start:self.sel_end]
 
-            # Export mode follows whichever preview button is currently
-            # engaged -- "what you hear is what you get", no separate mode
-            # selector needed. LOOP (preview_mode) wins if somehow both
-            # ended up set, since it represents the more deliberate,
-            # user-tuned choice.
-            if self.preview_mode:
+            # Export mode follows export_mode -- the user's last EXPLICIT
+            # toggle choice, not whatever preview_mode/repeat_var happen
+            # to read right now. This used to check self.preview_mode
+            # directly, which meant Crop or PaulXStretch -- both of
+            # which flip preview_mode False as a side effect of
+            # invalidating the live preview buffer, with NO intent to
+            # change the export choice -- would silently fall through to
+            # exporting UNPROCESSED audio after a confirmed, tested LOOP
+            # selection. Confirmed as a real (not just theoretical) gap:
+            # reported directly, with the exact Open->Select->LOOP->Crop
+            # sequence that triggers it. export_mode is set ONLY by the
+            # two toggle handlers and by load_file/unload_file, so it
+            # can't be reset by anything that merely edits audio.
+            if self.export_mode == "loop":
                 result, used_xfade, start_trim, end_trim = _run_pipeline(
                     segment, self.sr, xfade_seconds, curve, snap, window, self.auto_xfade_var.get(),
                 )
                 mode_label = "Crossfaded"
-            elif self.repeat_var.get():
+            elif self.export_mode == "repeat":
                 result = declick_edges(segment, self.sr)
                 used_xfade, start_trim, end_trim = 0.0, 0, 0
                 mode_label = "Declicked"
