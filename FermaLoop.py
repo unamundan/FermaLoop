@@ -322,6 +322,18 @@ def write_wav(path, data, samplerate, sampwidth):
 # Multi-format decode / encode (ffmpeg for anything that isn't plain WAV)
 # ---------------------------------------------------------------------------
 
+_SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # the actual
+# flag on Windows, a harmless no-op (0) everywhere else -- without this,
+# every ffmpeg call below briefly flashes a visible console window on
+# Windows specifically (a well-documented Windows+subprocess behavior:
+# a console executable launched from a GUI app gets its own console
+# window by default regardless of stdout/stderr being piped). Reported
+# directly as a "phantom zooming window outline" appearing top-left and
+# disappearing once loading finished -- exactly the shape of a console
+# window's brief open/close animation. Shared between both ffmpeg call
+# sites below so neither can be fixed without the other.
+
+
 def decode_to_pcm(path):
     """Decode any supported input format to (data, sr, sampwidth) via a
     24-bit PCM WAV intermediate. Plain WAV files skip ffmpeg entirely."""
@@ -336,7 +348,8 @@ def decode_to_pcm(path):
     with tempfile.TemporaryDirectory() as tmp:
         tmp_wav = os.path.join(tmp, "decoded.wav")
         cmd = [FFMPEG_PATH, "-y", "-i", path, "-c:a", "pcm_s24le", tmp_wav]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 creationflags=_SUBPROCESS_NO_WINDOW)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg failed to decode '{path}':\n{result.stderr.decode(errors='ignore')}")
         return read_wav(tmp_wav)
@@ -366,7 +379,8 @@ def encode_from_pcm(data, sr, sampwidth, out_path, mp3_quality=2):
         else:
             codec_args = FFMPEG_ENCODE_ARGS.get(ext, [])
         cmd = [FFMPEG_PATH, "-y", "-i", tmp_wav, *codec_args, out_path]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 creationflags=_SUBPROCESS_NO_WINDOW)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg failed to encode '{out_path}':\n{result.stderr.decode(errors='ignore')}")
 
@@ -790,8 +804,8 @@ SHORTCUT_LABELS = {
 TRANSPORT_HINTS = {
     "play_pause": ("Play / Pause", "Activate / freeze playback"),
     "stop": ("Stop", "Stop playback"),
-    "loop_toggle": ("Repeat", "Audition Declicked (Process & Save: Declicked)"),
-    "audition": ("Loop", "Audition Crossfaded (Process & Save: Crossfaded)"),
+    "loop_toggle": ("Repeat", "Declicked edges"),
+    "audition": ("Loop", "Crossfaded edges"),
     "crop": ("Crop Selected", "Remove unselected audio"),
     "stretch": ("Stretch", "Open PaulXStretch for extreme time-stretching of the current selection"),
 }
@@ -4770,17 +4784,17 @@ class LoopCrossfadeGUI:
                      # assignment bypasses this property entirely (see
                      # its comment), but this guard stays as a safety net
         if self.preview_mode:
-            self.process_btn_var.set("Process & Save: Crossfaded")
+            self.process_btn_var.set("Save Crossfaded")
         elif self.repeat_var.get():
-            self.process_btn_var.set("Process & Save: Declicked")
+            self.process_btn_var.set("Save Declicked")
         else:
-            # "Process & Save: Unprocessed" read as self-contradictory --
-            # nothing is actually being processed in this state (the
-            # button just saves the current selection as-is, aside from
-            # any earlier Crop), so "Process" was misleading. This is the
-            # only one of the three labels that changed -- REPEAT and
-            # LOOP both involve a real transform, so "Process & Save"
-            # still accurately describes what pressing the button does.
+            # All three labels now drop "Process &" uniformly, rather than
+            # only this one -- that was the actual inconsistency worth
+            # fixing (two states saying "Process & Save: X" while this one
+            # alone said "Save X" read as more arbitrary than principled).
+            # "Save" alone is accurate for all three: something is always
+            # being saved, and REPEAT/LOOP's own transform is already
+            # named by the word that follows it.
             self.process_btn_var.set("Save Unprocessed")
 
     def _mode_suffix(self):
