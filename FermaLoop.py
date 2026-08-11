@@ -5367,9 +5367,7 @@ class LoopCrossfadeGUI:
         # the window narrow further than this sum doesn't make the boxes
         # compress gracefully; it makes their background panel shrink
         # while their content stays full width and overflows it,
-        # pushing the rightmost boxes off the visible area entirely
-        # (reported directly: LOOP ALIGNMENT and then XFADE OVERLAP
-        # disappearing off the right edge as the window narrowed).
+        # pushing the rightmost boxes off the visible area entirely.
         # Genuinely reflowing that content at narrow widths would need
         # much more invasive per-box layout work; the safer fix, and the
         # same strategy already used for the stacking issue, is making
@@ -5377,9 +5375,32 @@ class LoopCrossfadeGUI:
         # it -- the window can still narrow meaningfully (dropping the
         # comfortable group margin/padding), just not past the point
         # where the boxes themselves would break.
+        #
+        # Computed as a DELTA against content_w rather than compared
+        # directly against it: the loop-group canvas goes through its
+        # own multi-stage <Configure> cascade (explicit pre-size above,
+        # then whatever _redraw_loop_group's own itemconfigure calls
+        # trigger) before content_w is read, and an earlier version of
+        # this that clamped directly with min(content_w, ...) produced a
+        # floor far too small in practice -- a live-tested regression
+        # (reported: dragging the window narrow enough to squash the
+        # Browse button down to a single letter), consistent with
+        # content_w having been read before that cascade had fully
+        # settled. Using content_w only for the "everything else in the
+        # window" delta -- chrome that ISN'T subject to that same
+        # empty-then-populated timing issue -- avoids depending on the
+        # same measurement that just proved unreliable for the group's
+        # own portion of the width.
         _boxes_natural_sum = sum(box_outer._rc["natural_w"] for box_outer, _ in self._box_pairs)
         _inter_box_padding = sum(sum(pad) for pad in self._box_side_by_side_paddings)
-        min_w = min(content_w, _boxes_natural_sum + _inter_box_padding + self._loop_group_margin * 2)
+        _group_natural_total = _boxes_natural_sum + _inter_box_padding + self._loop_group_margin * 2
+        _other_chrome_w = max(0, content_w - _group_natural_total)
+        min_w = _group_natural_total + _other_chrome_w
+        _log_startup(f"_apply_saved_or_natural_size: minsize width check -- "
+                     f"content_w={content_w}, boxes_natural_sum={_boxes_natural_sum}, "
+                     f"inter_box_padding={_inter_box_padding}, "
+                     f"group_natural_total={_group_natural_total}, "
+                     f"other_chrome_w={_other_chrome_w}, min_w={min_w}")
         self.root.minsize(min_w, content_h)  # height floor UNCHANGED -- it protects the
                                               # worst-case status message from getting
                                               # clipped again if manually shrunk; only
