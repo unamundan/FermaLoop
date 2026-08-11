@@ -5373,6 +5373,24 @@ class LoopCrossfadeGUI:
         would hit ITS OWN "arm without playing" branch instead, since at
         that exact moment self.player.playing is still False (Space
         hasn't started anything yet)."""
+        # TEMPORARY diagnostic, same log file as the other audio
+        # diagnostics -- logs the actual call stack at entry, since the
+        # post-crop pops turned out to correlate with this function being
+        # invoked again with no explicit L/Space press AND no
+        # _on_param_changed trace firing either, ruling out every
+        # caller/trigger checked so far by direct code reading. This
+        # settles it definitively instead of continuing to guess. Safe
+        # to remove once the actual caller is identified.
+        try:
+            import datetime, traceback
+            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
+            with open(log_path, "a") as f:
+                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
+                        f"_compute_and_play_loop_preview ENTRY (silent={silent}), call stack:\n")
+                for line in traceback.format_stack()[:-1]:
+                    f.write(f"    {line.rstrip()}\n")
+        except Exception:
+            pass
         if not SOUNDDEVICE_AVAILABLE:
             if not silent:
                 self.messagebox.showinfo("FermaLoop", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
