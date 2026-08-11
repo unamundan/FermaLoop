@@ -1289,6 +1289,24 @@ class AudioPlayer:
                     self.cursor = self.play_start
                     remaining = self.play_end - self.cursor
                 else:
+                    # TEMPORARY diagnostic, same log file as the other
+                    # audio diagnostics -- this path only runs when
+                    # play_loop is False, which shouldn't be the case
+                    # during a LOOP preview (confirmed True at compute
+                    # time in the other log) -- if this fires anyway,
+                    # play_loop itself got reset somewhere in between,
+                    # which is itself a key finding. Safe to remove once
+                    # identified.
+                    try:
+                        import datetime
+                        log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
+                        with open(log_path, "a") as f:
+                            f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
+                                    f"NATURAL STOP (non-looped path): cursor={self.cursor}, "
+                                    f"play_start={self.play_start}, play_end={self.play_end}, "
+                                    f"play_loop={self.play_loop}\n")
+                    except Exception:
+                        pass
                     outdata[write_offset:] = 0
                     self.playing = False
                     raise _sd.CallbackStop
@@ -1346,6 +1364,20 @@ class AudioPlayer:
                     outdata[write_offset + n + n2:] = 0
                     self.cursor += n2
                 else:
+                    # TEMPORARY diagnostic, same log file/reasoning as
+                    # the other natural-stop log just above -- this is
+                    # the SEPARATE mid-callback version of that same
+                    # path. Safe to remove once identified.
+                    try:
+                        import datetime
+                        log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
+                        with open(log_path, "a") as f:
+                            f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
+                                    f"NATURAL STOP (mid-callback path): cursor={self.cursor}, "
+                                    f"play_start={self.play_start}, play_end={self.play_end}, "
+                                    f"play_loop={self.play_loop}\n")
+                    except Exception:
+                        pass
                     outdata[write_offset + n:] = 0
                     self.playing = False
                     raise _sd.CallbackStop
@@ -4882,6 +4914,25 @@ class LoopCrossfadeGUI:
         # RIGHT NOW. Crop and PaulXStretch both flip preview_mode False
         # as a side effect of invalidating that buffer; neither means
         # the user changed their mind about exporting as a LOOP.
+        # TEMPORARY diagnostic, same log file as the other audio
+        # diagnostics -- logs every transition with a stack trace. The
+        # post-crop pops turned out to correlate with a SECOND
+        # _compute_and_play_loop_preview firing via on_play_pause's
+        # fresh-start branch specifically, which requires preview_mode
+        # to ALREADY be False by that point, not just player.playing --
+        # i.e. something resets BOTH, not just pauses. This should show
+        # exactly what does it. Safe to remove once identified.
+        if value != getattr(self, "_preview_mode", None):
+            try:
+                import datetime, traceback
+                log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
+                with open(log_path, "a") as f:
+                    f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
+                            f"preview_mode: {getattr(self, '_preview_mode', None)} -> {value}, call stack:\n")
+                    for line in traceback.format_stack()[:-1]:
+                        f.write(f"    {line.rstrip()}\n")
+            except Exception:
+                pass
         self._preview_mode = value
 
     def _set_export_mode(self, mode):
