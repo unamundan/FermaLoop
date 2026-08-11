@@ -1223,6 +1223,22 @@ class AudioPlayer:
                     self.cursor = self.play_start
                     remaining = self.play_end - self.cursor
                 else:
+                    # TEMPORARY diagnostic, same log file/pattern as the
+                    # underrun logging above and _log_repeat_toggle in the
+                    # GUI class -- confirms/rules out whether THIS is the
+                    # exact moment playback unexpectedly stops when
+                    # switching LOOP->REPEAT mid-playback (i.e. play_loop
+                    # was False here when it should have been True).
+                    try:
+                        import datetime
+                        log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
+                        with open(log_path, "a") as f:
+                            f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
+                                    f"_callback: STOPPING (play_loop=False) at cursor={self.cursor}, "
+                                    f"play_start={self.play_start}, play_end={self.play_end}, "
+                                    f"loop={self.loop}, declick_loop_wrap={self.declick_loop_wrap}\n")
+                    except Exception:
+                        pass
                     outdata[write_offset:] = 0
                     self.playing = False
                     raise _sd.CallbackStop
@@ -4769,8 +4785,38 @@ class LoopCrossfadeGUI:
         self.player.rewind()
         self._redraw()
 
+    def _log_repeat_toggle(self, label):
+        """TEMPORARY diagnostic, matching the existing pattern in
+        AudioPlayer._callback (same log file) -- toggling REPEAT while
+        LOOP is actively playing still needs a double-tap to actually
+        take effect, despite _exit_preview_mode's hot-swap path
+        confirming correct end-state in isolated, single-threaded
+        testing. That gap between isolated-test-correct and live-app-
+        broken points at something timing/concurrency-related between
+        this GUI-thread toggle and the separate audio callback thread --
+        logging the actual state at each step, across a real run, should
+        show what an isolated test can't. Safe to remove once the actual
+        mechanism is identified."""
+        try:
+            import datetime
+            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
+            with open(log_path, "a") as f:
+                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] {label}: "
+                        f"preview_mode={self.preview_mode}, repeat_var={self.repeat_var.get()}, "
+                        f"player.playing={self.player.playing}, player.loop={self.player.loop}, "
+                        f"player.play_loop={self.player.play_loop}, "
+                        f"player.declick_loop_wrap={self.player.declick_loop_wrap}, "
+                        f"player.cursor={self.player.cursor}, "
+                        f"player.sel_start={self.player.sel_start}, player.sel_end={self.player.sel_end}, "
+                        f"player.play_start={self.player.play_start}, player.play_end={self.player.play_end}, "
+                        f"gui.sel_start={self.sel_start}, gui.sel_end={self.sel_end}\n")
+        except Exception:
+            pass
+
     def on_repeat_toggle(self):
+        self._log_repeat_toggle("on_repeat_toggle: ENTRY")
         new_value = not self.repeat_var.get()
+        was_playing = self.player.playing
         if new_value and self.preview_mode:
             # REPEAT and LOOP are mutually exclusive -- turning REPEAT on
             # while LOOP/Audition is active needs to turn LOOP off and
@@ -4786,6 +4832,7 @@ class LoopCrossfadeGUI:
             # state it restores -- it needs to already see the new value.
             self.repeat_var.set(new_value)
             self._exit_preview_mode()
+            self._log_repeat_toggle("on_repeat_toggle: after _exit_preview_mode")
         else:
             self.repeat_var.set(new_value)
         # Always applied explicitly, not left to _exit_preview_mode alone:
@@ -4794,7 +4841,20 @@ class LoopCrossfadeGUI:
         # plain non-preview toggle path below -- this covers all of them
         # with one idempotent call.
         self.player.set_loop(self.repeat_var.get(), declick_wrap=True)
+        if new_value and not was_playing:
+            # Turning REPEAT on from a fully stopped state didn't
+            # actually start playback -- on_loop_preview's own
+            # equivalent path explicitly calls play() when nothing was
+            # already running; this path never did, so tapping L played
+            # immediately but tapping R only armed the state, silently
+            # requiring a separate Play press to hear anything (reported
+            # directly: "playback is not automatically begun").
+            self.player.set_selection(self.sel_start, self.sel_end)
+            self.player.set_cursor(self.sel_start)
+            self.player.play()
+            self._set_play_pause_icon(True)
         self._refresh_repeat_icon()
+        self._log_repeat_toggle("on_repeat_toggle: EXIT")
 
     def _read_process_params(self, silent=False):
         """Validates and returns (xfade_seconds_or_None, curve, snap, window)
