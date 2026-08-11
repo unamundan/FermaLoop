@@ -1307,7 +1307,7 @@ class AudioPlayer:
         self.stream.start()
         self.playing = True
 
-    def swap_playing_buffer(self, data, sr):
+    def swap_playing_buffer(self, data, sr, cursor=0):
         """Replaces the audio buffer WITHOUT stopping/restarting the actual
         OS audio stream, when one is already running at a matching sample
         rate/channel count. Used specifically for reprocessing WHILE
@@ -1317,7 +1317,21 @@ class AudioPlayer:
         stream cut off abruptly, which is a SEPARATE click source from the
         new-content-onset click the declick ramp handles. Falls back to a
         plain stop+load (no play -- caller is expected to call play() in
-        that case) if a live swap isn't possible."""
+        that case) if a live swap isn't possible.
+
+        `cursor` lets a caller land somewhere other than the very start of
+        the new buffer -- needed when swapping back to RAW audio at the
+        same logical position a processed preview was at (see
+        _exit_preview_mode), rather than always restarting from 0 the way
+        swapping in a freshly-reprocessed PREVIEW buffer correctly does.
+        Landing anywhere outside [sel_start, sel_end) here would silently
+        disable looping the moment set_selection() is called next:
+        _apply_bounds_from_cursor() only enables play_loop when cursor is
+        already WITHIN the selection at the moment it runs, and this old
+        default-0 cursor rarely was, for any selection not starting at
+        sample 0 -- confirmed directly (playback stopping dead at the
+        selection's end instead of looping, immediately after switching
+        from LOOP back to REPEAT mid-playback)."""
         if data.ndim == 1:
             data = data[:, None]
         new_data = np.ascontiguousarray(data.astype(np.float32))
@@ -1328,7 +1342,7 @@ class AudioPlayer:
             if can_hot_swap:
                 self.data = new_data
                 self.sel_start, self.sel_end = 0, len(new_data)
-                self.cursor = 0
+                self.cursor = max(0, min(cursor, len(new_data)))
                 self.play_start, self.play_end = 0, len(new_data)
                 self.play_loop = self.loop
                 self.declick_remaining = self.declick_total
@@ -3799,7 +3813,7 @@ class LoopCrossfadeGUI:
 
         btn_process = ttk.Button(outer, style="Accent.TButton",
                    command=self.run_process, takefocus=0)
-        self.process_btn_var = tk.StringVar(value="Process & Save: Unprocessed")
+        self.process_btn_var = tk.StringVar(value="Save Unprocessed")
         btn_process.configure(textvariable=self.process_btn_var)
         self._refresh_process_button_label()  # repeat_var's own trace_add only fires on
                                                 # FUTURE changes, and preview_mode's initial
@@ -4669,7 +4683,14 @@ class LoopCrossfadeGUI:
         elif self.repeat_var.get():
             self.process_btn_var.set("Process & Save: Declicked")
         else:
-            self.process_btn_var.set("Process & Save: Unprocessed")
+            # "Process & Save: Unprocessed" read as self-contradictory --
+            # nothing is actually being processed in this state (the
+            # button just saves the current selection as-is, aside from
+            # any earlier Crop), so "Process" was misleading. This is the
+            # only one of the three labels that changed -- REPEAT and
+            # LOOP both involve a real transform, so "Process & Save"
+            # still accurately describes what pressing the button does.
+            self.process_btn_var.set("Save Unprocessed")
 
     def _exit_preview_mode(self):
         """Swap the player back to raw (un-processed) audio -- used whenever
@@ -4681,16 +4702,26 @@ class LoopCrossfadeGUI:
             # actual audio stream (a separate click source from the
             # position-jump click the declick ramp handles) when this
             # happens WHILE actively playing, e.g. clicking outside the
-            # loop region to check surrounding context mid-audition
-            self.player.swap_playing_buffer(self.data, self.sr)
+            # loop region to check surrounding context mid-audition.
+            # cursor=self.sel_start lands directly on the right position
+            # as part of the swap itself (see swap_playing_buffer's own
+            # docstring for why) -- so unlike the not-playing branch
+            # below, this does NOT need a separate set_cursor() call
+            # afterward. Calling set_cursor() with a target EQUAL to
+            # where the cursor already sits would still trigger a full
+            # fade-out-then-fade-in cycle for a position that isn't
+            # actually moving -- a new, pointless audible dip that
+            # wasn't there before this fix.
+            self.player.swap_playing_buffer(self.data, self.sr, cursor=self.sel_start)
             self.player.set_loop(self.repeat_var.get(), declick_wrap=True)
+            self.player.set_selection(self.sel_start, self.sel_end)
         else:
             self.player.stop()
             self.player.load(self.data, self.sr)
-        self.player.set_selection(self.sel_start, self.sel_end)
-        self.player.set_cursor(self.sel_start)  # load() resets cursor to 0; restore it to
-                                                 # the loop start so a following Play resumes
-                                                 # the selection, not the start of the file
+            self.player.set_selection(self.sel_start, self.sel_end)
+            self.player.set_cursor(self.sel_start)  # load() resets cursor to 0; restore it to
+                                                      # the loop start so a following Play resumes
+                                                      # the selection, not the start of the file
         self.preview_mode = False
         self._refresh_loop_and_repeat_icons()
 
