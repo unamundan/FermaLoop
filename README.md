@@ -47,7 +47,7 @@ Turn any short recording into a seamless, endless loop, or stretch it into a lon
   current file.
 
 <p align="center">
-  <img src="docs/images/03_fermaloop_selection_closeup.png" width="100%">
+  <img src="docs/images/03_fermaloop_selection_closeup.png" width="500">
 </p>
 
 ---
