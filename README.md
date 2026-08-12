@@ -187,11 +187,9 @@ final loop length.
    actually happen: *Save Crossfaded*, *Save Declicked*, or *Save
    Unprocessed*.
 
-
 <p align="center">
   <img src="docs/images/07_fermaloop_save_button.png" width="100%">
 </p>
-
 
 
 ---
@@ -223,8 +221,9 @@ one to reassign it.
 | Zoom to Selection | 9 |
 | Stretch (open PaulXStretch) | X |
 
-> 🖼️ **[SCREENSHOT 8 — Preferences and Help window, HINTS + Keyboard
-> Shortcuts sections visible]**
+<p align="center">
+  <img src="08_fermaloop_preferences_window.png" width="400">
+</p>
 
 ---
 
