@@ -98,10 +98,9 @@ stops audio.
 
 ## Crossfade & Loop Options
 
-> 🖼️ **[SCREENSHOT 5 — The three option boxes: XFADE CURVE, XFADE
-> OVERLAP, LOOP ALIGNMENT]**
-> Full-width capture of just this row, at a size where the radio buttons
-> and fields are legible.
+<p align="center">
+  <img src="docs/images/05_fermaloop_crossfade_options.png" width="100%">
+</p>
 
 - **XFADE CURVE** — *Equal power* (smoother, constant perceived loudness)
   or *Linear* (simpler, can dip slightly in the middle).
