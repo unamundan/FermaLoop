@@ -1,4 +1,4 @@
-<h1 align="center">
+<h1 align="left">
   <img src="docs/images/FermaLoop_Logotype.png" alt="FermaLoop" width="400">
 </h1>
 
