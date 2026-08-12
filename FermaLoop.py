@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Licensed under the MIT License. See LICENSE file in the project root.
 """
 FermaLoop
 =========
@@ -21,7 +22,7 @@ build audio material that behaves less like a fixed backtrack and more
 like something a live operator can hold, extend, or release on cue.
 
 The resulting loops and stretches are meant to be exported and then
-programmed into cue-based playback software -- e.g. Figure53's QLab --
+programmed into cue-based theatrical audio playback software --
 where they can supplement the more rigid timing of pre-recorded
 backtracks with something more organically responsive to what's actually
 happening on stage: a way to introduce controllable, "conductable" timing
