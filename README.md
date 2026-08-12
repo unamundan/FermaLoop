@@ -149,15 +149,15 @@ good starting point.
 
 ### Credit
 
-FermaLoop's stretch feature is a from-scratch reimplementation of the
-core algorithm behind **Paul's Extreme Sound Stretch**, created by
+FermaLoop’s stretch feature is a from-scratch reimplementation of the
+core algorithm behind **Paul’s Extreme Sound Stretch**, created by
 [Nasca Octavian Paul](https://www.paulnasca.com/) — the original tool
 lives at [hypermammut.sourceforge.net/paulstretch](https://hypermammut.sourceforge.net/paulstretch/).
 The name "PaulXStretch" specifically nods to
 [Xenakios](https://github.com/essej)'s modern continuation of the
 project, [PaulXStretch](https://sonosaurus.com/paulxstretch/) ([source](https://github.com/essej/paulxstretch)),
-which FermaLoop's own feature is named after. No code is shared between
-the two — FermaLoop's implementation is its own — but the technique and
+which FermaLoop’s own feature is named after. No code is shared between
+the two — FermaLoop’s implementation is its own — but the technique and
 its name both originate there, and crediting that clearly here felt like
 the right thing to do.
 
@@ -167,7 +167,7 @@ the right thing to do.
 
 Cropping trims the loaded file down to just the current selection. **You
 don't need to crop before saving** — Save always processes and exports
-only the current selection regardless of whether you've cropped. Crop is
+only the current selection regardless of whether you’ve cropped. Crop is
 useful if you want to keep working with just that trimmed region (e.g.,
 before a further Stretch), or want the loaded file itself to match the
 final loop length.
@@ -187,8 +187,12 @@ final loop length.
    actually happen: *Save Crossfaded*, *Save Declicked*, or *Save
    Unprocessed*.
 
-> 🖼️ **[SCREENSHOT 7 — Save button showing one of its mode-specific
-> labels, plus the status message underneath after a successful save]**
+
+<p align="center">
+  <img src="docs/images/07_fermaloop_save_button.png" width="100%">
+</p>
+
+
 
 ---
 
