@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/FermaLoop_Logotype.png" width="300">
+</p>
+
 # FermaLoop
 
 Turn any short recording into a seamless, endless loop, or stretch it into
