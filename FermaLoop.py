@@ -1158,25 +1158,6 @@ class AudioPlayer:
                 self._apply_bounds_from_cursor()
 
     def _callback(self, outdata, frames, time_info, status):
-        # TEMPORARY diagnostic: sounddevice passes a non-empty `status`
-        # when something like an output underflow occurs -- logging this
-        # (with a timestamp and how many were in a row) will tell us
-        # definitively whether the post-crop "pops" are buffer underruns
-        # (the callback not producing frames fast enough for the driver)
-        # rather than a logic bug in what samples get produced. Safe to
-        # remove once we know which side of that line the problem is on.
-        if status:
-            try:
-                import datetime
-                self._underrun_count = getattr(self, "_underrun_count", 0) + 1
-                if self._underrun_count <= 30:  # cap to avoid flooding the log
-                    log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
-                    with open(log_path, "a") as f:
-                        f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
-                                f"callback status={status} (#{self._underrun_count}), "
-                                f"frames requested={frames}\n")
-            except Exception:
-                pass
         with self.lock:
             if self.data is None:
                 outdata[:] = 0
@@ -1268,45 +1249,9 @@ class AudioPlayer:
             remaining = self.play_end - self.cursor
             if remaining <= 0:
                 if self.play_loop:
-                    # TEMPORARY diagnostic, same log file as the underrun
-                    # logging above -- logs the actual moment of each loop
-                    # wrap (capped, same reasoning as the underrun log) so
-                    # wrap timing/cadence can be directly compared against
-                    # when pops are actually heard, rather than inferred.
-                    # Safe to remove once the mechanism is identified.
-                    try:
-                        import datetime
-                        self._wrap_log_count = getattr(self, "_wrap_log_count", 0) + 1
-                        if self._wrap_log_count <= 30:
-                            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
-                            with open(log_path, "a") as f:
-                                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
-                                        f"WRAP #{self._wrap_log_count}: cursor was {self.cursor}, "
-                                        f"play_start={self.play_start}, play_end={self.play_end}, "
-                                        f"data.shape={self.data.shape}\n")
-                    except Exception:
-                        pass
                     self.cursor = self.play_start
                     remaining = self.play_end - self.cursor
                 else:
-                    # TEMPORARY diagnostic, same log file as the other
-                    # audio diagnostics -- this path only runs when
-                    # play_loop is False, which shouldn't be the case
-                    # during a LOOP preview (confirmed True at compute
-                    # time in the other log) -- if this fires anyway,
-                    # play_loop itself got reset somewhere in between,
-                    # which is itself a key finding. Safe to remove once
-                    # identified.
-                    try:
-                        import datetime
-                        log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
-                        with open(log_path, "a") as f:
-                            f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
-                                    f"NATURAL STOP (non-looped path): cursor={self.cursor}, "
-                                    f"play_start={self.play_start}, play_end={self.play_end}, "
-                                    f"play_loop={self.play_loop}\n")
-                    except Exception:
-                        pass
                     outdata[write_offset:] = 0
                     self.playing = False
                     raise _sd.CallbackStop
@@ -1337,24 +1282,6 @@ class AudioPlayer:
             self.cursor += n
             if n < frames_left:
                 if self.play_loop:
-                    # TEMPORARY diagnostic, same log file/cap/reasoning as
-                    # the other WRAP log above -- this is a SEPARATE wrap
-                    # path (mid-callback, rather than at the start of one),
-                    # so a wrap landing here instead wouldn't have shown up
-                    # in the other log at all. Safe to remove once the
-                    # mechanism is identified.
-                    try:
-                        import datetime
-                        self._wrap_log_count = getattr(self, "_wrap_log_count", 0) + 1
-                        if self._wrap_log_count <= 30:
-                            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
-                            with open(log_path, "a") as f:
-                                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
-                                        f"WRAP(mid-callback) #{self._wrap_log_count}: cursor was "
-                                        f"{self.cursor}, play_start={self.play_start}, "
-                                        f"play_end={self.play_end}, data.shape={self.data.shape}\n")
-                    except Exception:
-                        pass
                     self.cursor = self.play_start
                     n2 = min(frames_left - n, self.play_end - self.play_start)
                     chunk2 = self.data[self.play_start:self.play_start + n2]
@@ -1364,20 +1291,6 @@ class AudioPlayer:
                     outdata[write_offset + n + n2:] = 0
                     self.cursor += n2
                 else:
-                    # TEMPORARY diagnostic, same log file/reasoning as
-                    # the other natural-stop log just above -- this is
-                    # the SEPARATE mid-callback version of that same
-                    # path. Safe to remove once identified.
-                    try:
-                        import datetime
-                        log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
-                        with open(log_path, "a") as f:
-                            f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
-                                    f"NATURAL STOP (mid-callback path): cursor={self.cursor}, "
-                                    f"play_start={self.play_start}, play_end={self.play_end}, "
-                                    f"play_loop={self.play_loop}\n")
-                    except Exception:
-                        pass
                     outdata[write_offset + n:] = 0
                     self.playing = False
                     raise _sd.CallbackStop
@@ -1397,60 +1310,49 @@ class AudioPlayer:
             self.pending_cursor = None  # defensive: no stale jump from a previous session
             self.fadeout_remaining = 0
         channels = self.data.shape[1]
-        # latency='low' matters here specifically: without it, PortAudio's
-        # default latency setting can leave several buffers' worth of audio
-        # already queued in the driver at any moment -- meaning a click that
-        # jumps the cursor mid-playback might not actually reach the speaker
-        # output until AFTER a buffer or two of stale (pre-click) audio has
-        # already played, bypassing the declick ramp entirely (the ramp only
-        # affects content generated after the jump, not what's already
-        # queued). Lower latency shrinks that window. This is a different
-        # layer of the problem than the ramp itself, and one my direct
-        # callback-level testing couldn't have caught, since it only
-        # exercises the callback's own logic, not real driver buffering.
+        # Uses the OS/PortAudio's own default latency and blocksize, not an
+        # explicit low-latency + blocksize=256 request. That aggressive
+        # configuration (a 5.8ms budget at 44.1kHz) was confirmed, via
+        # direct A/B testing, to be the actual cause of an intermittent
+        # popping sound during LOOP/REPEAT playback -- reported specifically
+        # after Crop, though the mechanism isn't crop-specific, just easiest
+        # to reproduce with a short, tightly-looped buffer. Every app-level
+        # mechanism that could otherwise explain it was checked and ruled
+        # out directly first: underruns (sounddevice's own status flag
+        # never fired), spurious recomputation, play_start/play_end/
+        # play_loop boundary mismatches, unexpected preview_mode/state
+        # resets, the explicit-seek declick machinery below, and the
+        # crossfaded content itself (confirmed clean on an actual exported
+        # file -- its wrap-point sample jump measured SMALLER than the
+        # file's own median sample-to-sample variation, i.e. no
+        # discontinuity at all). None of those explained it; removing the
+        # aggressive latency/blocksize request did, confirmed with a build
+        # that logged which configuration was actually in use each time.
         #
-        # TEMPORARY EXPERIMENT: every app-level mechanism that could explain
-        # the reported periodic pops during LOOP playback has been checked
-        # and ruled out directly (underruns, spurious recompute, boundary
-        # mismatch, unexpected state resets, explicit-seek declick, and the
-        # crossfaded content itself -- confirmed clean on the actual
-        # exported file, its wrap-point jump measured SMALLER than the
-        # file's own median sample-to-sample variation). That points at
-        # something below the Python level -- and blocksize=256 at
-        # latency='low' is a genuinely aggressive, 5.8ms-budget setting;
-        # not every OS/driver-level hiccup necessarily surfaces through
-        # sounddevice's own `status` flag the way a clean PortAudio-level
-        # underrun does. This reverses the normal try-order to attempt the
-        # most CONSERVATIVE configuration (no explicit latency/blocksize,
-        # letting the OS pick its own defaults) FIRST, specifically to test
-        # whether the aggressive settings are implicated. Revert this
-        # ordering once that's answered either way -- low latency matters
-        # for the declick-on-seek behavior described above, so this
-        # shouldn't stay reversed as the permanent default regardless of
-        # the outcome.
+        # This does trade away the specific benefit low latency provided:
+        # without it, PortAudio's default latency can leave more audio
+        # already queued in the driver at any moment, so a mid-playback
+        # jump (an explicit seek/click, see set_cursor()) may have a
+        # slightly longer window before the declick ramp's new content
+        # actually reaches the speaker. That's a comparatively narrow,
+        # one-time-per-seek concern; a periodic pop on every loop cycle
+        # during ordinary playback is the more disruptive problem, so this
+        # is the right trade for the common case. The fallbacks below exist
+        # only as a safety net if this exact system/device combination
+        # can't open a stream with default settings at all -- ordinary
+        # operation should never need them.
         try:
             self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
                                             callback=self._callback, dtype="float32")
-            _stream_config_used = "conservative (no explicit latency/blocksize)"
         except Exception:
             try:
                 self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
                                                 callback=self._callback, dtype="float32",
                                                 latency="low", blocksize=256)
-                _stream_config_used = "low-latency+blocksize=256 (fallback)"
             except Exception:
                 self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
                                                 callback=self._callback, dtype="float32",
                                                 latency="low")
-                _stream_config_used = "low-latency only (fallback)"
-        try:
-            import datetime
-            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
-            with open(log_path, "a") as f:
-                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
-                        f"play(): stream config used = {_stream_config_used}\n")
-        except Exception:
-            pass
         self.stream.start()
         self.playing = True
 
@@ -4945,25 +4847,6 @@ class LoopCrossfadeGUI:
         # RIGHT NOW. Crop and PaulXStretch both flip preview_mode False
         # as a side effect of invalidating that buffer; neither means
         # the user changed their mind about exporting as a LOOP.
-        # TEMPORARY diagnostic, same log file as the other audio
-        # diagnostics -- logs every transition with a stack trace. The
-        # post-crop pops turned out to correlate with a SECOND
-        # _compute_and_play_loop_preview firing via on_play_pause's
-        # fresh-start branch specifically, which requires preview_mode
-        # to ALREADY be False by that point, not just player.playing --
-        # i.e. something resets BOTH, not just pauses. This should show
-        # exactly what does it. Safe to remove once identified.
-        if value != getattr(self, "_preview_mode", None):
-            try:
-                import datetime, traceback
-                log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
-                with open(log_path, "a") as f:
-                    f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
-                            f"preview_mode: {getattr(self, '_preview_mode', None)} -> {value}, call stack:\n")
-                    for line in traceback.format_stack()[:-1]:
-                        f.write(f"    {line.rstrip()}\n")
-            except Exception:
-                pass
         self._preview_mode = value
 
     def _set_export_mode(self, mode):
@@ -5315,27 +5198,6 @@ class LoopCrossfadeGUI:
         what crossfade length it would currently pick, so toggling the
         checkbox (or changing the selection/curve/snap settings) gives
         immediate feedback without requiring playback."""
-        # TEMPORARY diagnostic, same log file as the other audio
-        # diagnostics -- the post-crop pops turned out to correlate with
-        # _compute_and_play_loop_preview being invoked AGAIN, roughly once
-        # per loop cycle, with no explicit L/Space press to explain it.
-        # This function (specifically its preview_mode branch) is the
-        # ONLY other path that calls it -- so logging exactly which
-        # tracked variable's trace fired should show what's actually
-        # triggering it. args is Tk's own (var_name, index, mode) for
-        # whichever variable's trace this is. Safe to remove once the
-        # actual trigger is identified.
-        try:
-            import datetime
-            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
-            with open(log_path, "a") as f:
-                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
-                        f"_on_param_changed fired: args={args}, preview_mode={self.preview_mode}, "
-                        f"xfade_var={self.xfade_var.get()!r}, curve_var={self.curve_var.get()!r}, "
-                        f"auto_xfade_var={self.auto_xfade_var.get()!r}, snap_var={self.snap_var.get()!r}, "
-                        f"window_var={self.window_var.get()!r}\n")
-        except Exception:
-            pass
         if self._live_update_after_id is not None:
             self.root.after_cancel(self._live_update_after_id)
         if self.preview_mode:
@@ -5455,24 +5317,6 @@ class LoopCrossfadeGUI:
         would hit ITS OWN "arm without playing" branch instead, since at
         that exact moment self.player.playing is still False (Space
         hasn't started anything yet)."""
-        # TEMPORARY diagnostic, same log file as the other audio
-        # diagnostics -- logs the actual call stack at entry, since the
-        # post-crop pops turned out to correlate with this function being
-        # invoked again with no explicit L/Space press AND no
-        # _on_param_changed trace firing either, ruling out every
-        # caller/trigger checked so far by direct code reading. This
-        # settles it definitively instead of continuing to guess. Safe
-        # to remove once the actual caller is identified.
-        try:
-            import datetime, traceback
-            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
-            with open(log_path, "a") as f:
-                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
-                        f"_compute_and_play_loop_preview ENTRY (silent={silent}), call stack:\n")
-                for line in traceback.format_stack()[:-1]:
-                    f.write(f"    {line.rstrip()}\n")
-        except Exception:
-            pass
         if not SOUNDDEVICE_AVAILABLE:
             if not silent:
                 self.messagebox.showinfo("FermaLoop", "Install the 'sounddevice' package to enable playback:\npip install sounddevice")
@@ -5503,41 +5347,6 @@ class LoopCrossfadeGUI:
                 self.player.load(preview, self.sr)
                 self.player.set_loop(True, declick_wrap=False)
                 self.player.play()
-            # TEMPORARY diagnostic, same log file as the underrun logging
-            # in AudioPlayer._callback -- confirmed via that log's own
-            # ABSENCE (no file was even created, meaning `status` never
-            # came back truthy from sounddevice) that the reported
-            # post-crop popping isn't a buffer underrun/timing issue.
-            # This logs the actual computed boundaries instead, so a
-            # genuine mismatch (e.g. play_end not matching the real
-            # buffer length, or play_loop landing False when it should
-            # be True) would show up directly rather than needing to be
-            # inferred from code-reading alone. Safe to remove once the
-            # actual mechanism is identified.
-            try:
-                import datetime
-                log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
-                with open(log_path, "a") as f:
-                    f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
-                            f"_compute_and_play_loop_preview: was_already_auditioning="
-                            f"{was_already_auditioning}, preview.shape={preview.shape}, "
-                            f"used_xfade={used_xfade:.4f}s ({used_xfade*self.sr:.0f} samples), "
-                            f"player.data.shape={self.player.data.shape if self.player.data is not None else None}, "
-                            f"player.play_start={self.player.play_start}, "
-                            f"player.play_end={self.player.play_end}, "
-                            f"player.play_loop={self.player.play_loop}, "
-                            f"player.declick_loop_wrap={self.player.declick_loop_wrap}, "
-                            f"player.cursor={self.player.cursor}\n")
-            except Exception:
-                pass
-            self.player._wrap_log_count = 0  # fresh 30-entry wrap-logging budget for
-                                              # THIS playback session specifically --
-                                              # otherwise a long earlier session (e.g.
-                                              # the pre-crop playback) can exhaust the
-                                              # cap before the session that actually
-                                              # needs to be observed (e.g. post-crop)
-                                              # even starts, silently hiding it
-            self.player._underrun_count = 0  # same reasoning, for the underrun log
             self.preview_mode = True
             # REPEAT and LOOP are mutually exclusive, and this is now the
             # active mode -- repeat_var was otherwise ONLY ever managed by
