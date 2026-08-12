@@ -126,28 +126,6 @@ import threading
 import subprocess
 import numpy as np
 
-# TEMPORARY diagnostic: a previous fix to the CURVE/XFADE/LOOP boxes'
-# redundant rendering (see _apply_saved_or_natural_size) didn't fully
-# resolve a reported multi-second delay before those boxes appear at
-# launch -- meaning some of that delay likely lives somewhere else in
-# startup entirely. Rather than guess again, this times the WHOLE launch
-# sequence from module import through the final render, all on one
-# shared clock, so the actual bottleneck shows up concretely in
-# ~/fermaloop_startup_debug.txt instead of being theorized about
-# further. Safe to remove once we have that data.
-_STARTUP_T0 = time.perf_counter()
-
-
-def _log_startup(label):
-    try:
-        elapsed = time.perf_counter() - _STARTUP_T0
-        log_path = os.path.join(os.path.expanduser("~"), "fermaloop_startup_debug.txt")
-        with open(log_path, "a") as f:
-            f.write(f"  [{elapsed:8.4f}s since module import began] {label}\n")
-    except Exception:
-        pass
-
-
 def _find_ffmpeg():
     """Looks for a copy of ffmpeg bundled alongside a packaged (frozen)
     build of this app first, so a PyInstaller build with ffmpeg embedded
@@ -163,7 +141,6 @@ def _find_ffmpeg():
 
 
 FFMPEG_PATH = _find_ffmpeg()
-_log_startup("FFMPEG_PATH resolved (module-level, before any GUI code runs)")
 SUPPORTED_EXTS = {".wav", ".aif", ".aiff", ".mp3", ".mp4", ".m4a", ".flac"}
 
 # The three output formats the GUI's Format selector offers (input loading
@@ -3014,13 +2991,11 @@ class LoopCrossfadeGUI:
     ICON_SIZE = 26  # transport icons sized to roughly fill the button height
 
     def __init__(self):
-        _log_startup("LoopCrossfadeGUI.__init__ starting")
         import tkinter as tk
         from tkinter import filedialog, messagebox, ttk
         self.tk, self.filedialog, self.messagebox, self.ttk = tk, filedialog, messagebox, ttk
 
         self.root = TkinterDnD.Tk() if DND_AVAILABLE else tk.Tk()
-        _log_startup("tk root window created")
         # Hidden immediately, shown only once at the very end of __init__
         # (see the matching deiconify() there) -- without this, the
         # window is visible from the instant it's created, meaning every
@@ -3074,7 +3049,6 @@ class LoopCrossfadeGUI:
         except Exception:
             pass
         self.window_sizes = load_window_sizes()
-        _log_startup("load_window_sizes() done")
         # tooltip on/off preference lives in the same JSON as window
         # sizes/positions rather than a dedicated file, since it's a
         # single small boolean and this file is already loaded/saved at
@@ -3083,7 +3057,6 @@ class LoopCrossfadeGUI:
         self.tooltips_enabled_var = tk.BooleanVar(value=ToolTip.enabled)
 
         self._build_style()
-        _log_startup("_build_style() done")
 
         # ---- state ----
         self.data = None           # currently loaded (possibly cropped) audio, float64 (n, ch)
@@ -3148,7 +3121,6 @@ class LoopCrossfadeGUI:
         self._play_tooltip = None
         self.player = AudioPlayer()
         self.shortcuts = load_shortcuts()
-        _log_startup("AudioPlayer() + load_shortcuts() done")
 
         self.in_path_var = tk.StringVar()
         self.out_path_var = tk.StringVar()
@@ -3201,15 +3173,11 @@ class LoopCrossfadeGUI:
         self.format_var.trace_add("write", self._on_format_changed)
 
         self._build_widgets()
-        _log_startup("_build_widgets() done (icon rendering, all box construction)")
         self._bind_shortcuts()
-        _log_startup("_bind_shortcuts() done")
         if DND_AVAILABLE:
             self._enable_drag_and_drop()
-            _log_startup("_enable_drag_and_drop() done")
 
         self._apply_saved_or_natural_size()
-        _log_startup("_apply_saved_or_natural_size() done -- launch sequence complete")
         # NOW show the window, for the first time (Windows only -- see
         # the matching withdraw() note above for why macOS never hides
         # it in the first place). Everything above this point has
@@ -3218,7 +3186,6 @@ class LoopCrossfadeGUI:
         # not a rapid sequence of intermediate ones.
         if not IS_MACOS:
             self.root.deiconify()
-        _log_startup("window shown (deiconify)")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._poll_playhead()
@@ -5805,6 +5772,15 @@ class LoopCrossfadeGUI:
         tk, ttk = self.tk, self.ttk
         import webbrowser
         dlg = tk.Toplevel(self.root)
+        dlg.withdraw()  # hidden until fully built AND correctly positioned below --
+                         # without this, the Toplevel is visible immediately at
+                         # whatever default position the window manager chooses,
+                         # then visibly jumps to its real position once geometry()
+                         # is finally called at the end of this function. Reported
+                         # directly on macOS as a "ghost" flash of the window at
+                         # the wrong spot (down and left of where it settles)
+                         # before snapping to the correct one (right of, and
+                         # top-aligned with, the main window) a moment later.
         self._shortcuts_dialog = dlg
         dlg.title("Preferences and Help")
         dlg.configure(bg=BG)
@@ -5832,12 +5808,11 @@ class LoopCrossfadeGUI:
 
         ttk.Label(content, text="HINTS", background=BG, foreground=FG,
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=12, pady=(0, 4))
-        for hint in ("Click and drag to select; drag white edge bars to adjust target selection",
+        for hint in ("Click and drag to select; drag white edge bars to adjust",
                      "Click in waveform to move playhead",
                      "Optional: Stretch selection with PaulXStretch",
                      "Set desired LOOP XFade Curve/Overlap & Alignment options",
-                     "Enable REPEAT or LOOP to audition; ensure one is still enabled before saving to process",
-                     "Crop and save"):
+                     "Enable REPEAT or LOOP to audition and determine saved file processing"):
             ttk.Label(content, text=f"\u2022 {hint}", background=BG, foreground=MUTED,
                       font=("Segoe UI", 9)).pack(anchor="w", padx=22, pady=1)
 
@@ -5926,6 +5901,8 @@ class LoopCrossfadeGUI:
         x = self.root.winfo_rootx() + self.root.winfo_width() + 10
         y = self.root.winfo_y()
         dlg.geometry(f"{w}x{h}+{x}+{y}")
+        dlg.deiconify()  # reveal now that content is built AND correctly
+                          # positioned -- see the withdraw() call above
         dlg.after(20, lambda: dlg.geometry(f"{w}x{h}+{x}+{y}"))  # defensive re-apply against WM timing quirks
 
         def on_close():
@@ -6025,9 +6002,7 @@ class LoopCrossfadeGUI:
         """Sizes the window to fit everything on first paint (no manual
         resize needed), while respecting a larger size -- and now also a
         saved position -- the user may have deliberately set last time."""
-        _log_startup("_apply_saved_or_natural_size: starting")
         self.root.update_idletasks()
-        _log_startup("_apply_saved_or_natural_size: after initial update_idletasks()")
 
         # Measure the box row's natural (side-by-side, the only
         # arrangement that exists now) size directly -- no more force-
@@ -6039,7 +6014,6 @@ class LoopCrossfadeGUI:
         for box_outer, _ in self._box_pairs:
             box_outer._rc["canvas"].configure(
                 width=box_outer._rc["natural_w"], height=box_outer._rc["natural_h"])
-        _log_startup("_apply_saved_or_natural_size: after box canvas width/height configure")
 
         # The loop-group canvas (wraps XFADE CURVE/OVERLAP/LOOP ALIGNMENT
         # with the border+tail) has the same bare-canvas issue, sized to
@@ -6055,7 +6029,6 @@ class LoopCrossfadeGUI:
 
         self.root.update()  # full update -- reqwidth needs a real event
                              # pass to settle and reflect this configure change
-        _log_startup("_apply_saved_or_natural_size: after self.root.update() (forced full event processing)")
         content_w = self.root.winfo_reqwidth()
         natural_h = self.root.winfo_reqheight()  # baseline BEFORE swapping in worst-case text
 
@@ -6110,7 +6083,6 @@ class LoopCrossfadeGUI:
                 self.root.geometry(f"{w}x{h}")
         else:
             self.root.geometry(f"{w}x{h}")
-        _log_startup("_apply_saved_or_natural_size: after applying final geometry()")
 
         self._redraw_loop_group()  # the one real, visible render pass -- draws
                                     # the group border/tail at its final size
@@ -6120,7 +6092,6 @@ class LoopCrossfadeGUI:
                                                   # already the true minimum --
                                                   # no collapsibility below it,
                                                   # by design
-        _log_startup("_apply_saved_or_natural_size: done")
 
     def _on_close(self):
         try:
