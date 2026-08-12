@@ -123,10 +123,9 @@ based on the "Paul's Extreme Sound Stretch" technique. Best suited to
 ambient/drone material; rhythmic content will smear into texture, which
 is inherent to how the technique works, not a bug.
 
-> 🖼️ **[SCREENSHOT 6 — PaulXStretch dialog, with a stretch factor and
-> window size entered]**
-> Both values are typed numbers, not sliders — capture the dialog
-> showing its two fields and their "typical range" hint text.
+<p align="center">
+  <img src="docs/images/06_fermaloop_paulxstretch_dialog.png">
+</p>
 
 - Open it from the **Stretch** button, set the two values below, apply.
 - The result replaces the current selection and can be undone
