@@ -5499,6 +5499,14 @@ class LoopCrossfadeGUI:
                             f"player.cursor={self.player.cursor}\n")
             except Exception:
                 pass
+            self.player._wrap_log_count = 0  # fresh 30-entry wrap-logging budget for
+                                              # THIS playback session specifically --
+                                              # otherwise a long earlier session (e.g.
+                                              # the pre-crop playback) can exhaust the
+                                              # cap before the session that actually
+                                              # needs to be observed (e.g. post-crop)
+                                              # even starts, silently hiding it
+            self.player._underrun_count = 0  # same reasoning, for the underrun log
             self.preview_mode = True
             # REPEAT and LOOP are mutually exclusive, and this is now the
             # active mode -- repeat_var was otherwise ONLY ever managed by
