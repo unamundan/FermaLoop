@@ -60,7 +60,7 @@ else (Rewind, Zoom, Undo/Redo) is keyboard-only; see
 text here rather than guessed icon glyphs — get the real icon crops from
 a screenshot instead of a placeholder attempting to reproduce them.
 
-<p align="center">
+<div align="center">
 
 | Button | Action |
 |---|---|
@@ -70,7 +70,8 @@ a screenshot instead of a placeholder attempting to reproduce them.
 | LOOP | Loop the selection with a crossfaded seam |
 | Crop | Trim the loaded file down to the current selection |
 | Stretch | Open PaulXStretch (extreme time-stretch) |
-</p>
+
+</div>
 
 <p align="center">
   <img src="docs/images/04_fermaloop_transport_row.png" width="50%">
