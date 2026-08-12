@@ -3,7 +3,7 @@
 Technical reference for `FermaLoop.py`: architecture, dependencies,
 build process, and known limitations. If you're looking for what the
 app *does* and how to use it rather than how it's built, see
-[`README.md`](README.md) for a full walkthrough, or the in-app "Prefs
+[`README.md`](README.md) for a full walkthrough, or the in-app "Preferences
 and Help" window for a quicker in-context reference.
 
 ---
