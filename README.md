@@ -1,8 +1,6 @@
-<p align="left">
-  <img src="docs/images/FermaLoop_Logotype.png" width="400">
-</p>
-
-# FermaLoop
+<h1 align="center">
+  <img src="docs/images/FermaLoop_Logotype.png" alt="FermaLoop" width="400">
+</h1>
 
 Turn any short recording into a seamless, endless loop, or stretch it into
 a long evolving texture — for live theatrical sound design, ambient beds,
