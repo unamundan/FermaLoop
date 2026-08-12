@@ -2,9 +2,7 @@
   <img src="docs/images/FermaLoop_Logotype.png" alt="FermaLoop" width="400">
 </h1>
 
-Turn any short recording into a seamless, endless loop, or stretch it into
-a long evolving texture — for live theatrical sound design, ambient beds,
-or anywhere you need audio that plays forever without a click at the seam. “FermaLoop” is a portmanteau which blends fermata — the musical notation for a held note or pause, sustained for as long the performer chooses — with loop, reflecting the app's purpose: turning a short audio clip into a seamless, indefinitely extendable loop that a live operator can hold or release on cue, much like a fermata itself.
+Turn any short recording into a seamless, endless loop, or stretch it into a long evolving texture — for live theatrical sound design, ambient beds, or anywhere you need audio that plays forever without a click at the seam. “FermaLoop” is a portmanteau which blends fermata — the musical notation for a held note or pause, sustained for as long the performer chooses — with loop, reflecting the app's purpose: turning a short audio clip into a seamless, indefinitely extendable loop that a live operator can hold or release on cue, much like a fermata itself.
 
 > 🖼️ **[SCREENSHOT 1 — Main window, a file loaded, a selection made]**
 > Full window, annotated if possible: label the waveform, the selection
