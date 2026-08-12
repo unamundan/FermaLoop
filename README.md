@@ -73,6 +73,7 @@ a screenshot instead of a placeholder attempting to reproduce them.
 
 </div>
 
+<br>
 <p align="center">
   <img src="docs/images/04_fermaloop_transport_row.png" width="50%">
 </p>
