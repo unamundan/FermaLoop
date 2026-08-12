@@ -1408,18 +1408,49 @@ class AudioPlayer:
         # layer of the problem than the ramp itself, and one my direct
         # callback-level testing couldn't have caught, since it only
         # exercises the callback's own logic, not real driver buffering.
+        #
+        # TEMPORARY EXPERIMENT: every app-level mechanism that could explain
+        # the reported periodic pops during LOOP playback has been checked
+        # and ruled out directly (underruns, spurious recompute, boundary
+        # mismatch, unexpected state resets, explicit-seek declick, and the
+        # crossfaded content itself -- confirmed clean on the actual
+        # exported file, its wrap-point jump measured SMALLER than the
+        # file's own median sample-to-sample variation). That points at
+        # something below the Python level -- and blocksize=256 at
+        # latency='low' is a genuinely aggressive, 5.8ms-budget setting;
+        # not every OS/driver-level hiccup necessarily surfaces through
+        # sounddevice's own `status` flag the way a clean PortAudio-level
+        # underrun does. This reverses the normal try-order to attempt the
+        # most CONSERVATIVE configuration (no explicit latency/blocksize,
+        # letting the OS pick its own defaults) FIRST, specifically to test
+        # whether the aggressive settings are implicated. Revert this
+        # ordering once that's answered either way -- low latency matters
+        # for the declick-on-seek behavior described above, so this
+        # shouldn't stay reversed as the permanent default regardless of
+        # the outcome.
         try:
             self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
-                                            callback=self._callback, dtype="float32",
-                                            latency="low", blocksize=256)
+                                            callback=self._callback, dtype="float32")
+            _stream_config_used = "conservative (no explicit latency/blocksize)"
         except Exception:
             try:
                 self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
                                                 callback=self._callback, dtype="float32",
-                                                latency="low")
+                                                latency="low", blocksize=256)
+                _stream_config_used = "low-latency+blocksize=256 (fallback)"
             except Exception:
                 self.stream = _sd.OutputStream(samplerate=self.sr, channels=channels,
-                                                callback=self._callback, dtype="float32")
+                                                callback=self._callback, dtype="float32",
+                                                latency="low")
+                _stream_config_used = "low-latency only (fallback)"
+        try:
+            import datetime
+            log_path = os.path.join(os.path.expanduser("~"), "fermaloop_audio_debug.txt")
+            with open(log_path, "a") as f:
+                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] "
+                        f"play(): stream config used = {_stream_config_used}\n")
+        except Exception:
+            pass
         self.stream.start()
         self.playing = True
 
