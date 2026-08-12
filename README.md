@@ -119,7 +119,7 @@ stop and re-audition after changing a setting.
 ## PaulXStretch (Extreme Time-Stretch)
 
 Stretches the current selection into a long, evolving, textural bed —
-based on the "Paul's Extreme Sound Stretch" technique. Best suited to
+based on the “Paul’s Extreme Sound Stretch” technique. Best suited to
 ambient/drone material; rhythmic content will smear into texture, which
 is inherent to how the technique works, not a bug.
 
