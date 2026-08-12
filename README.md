@@ -69,15 +69,10 @@ a screenshot instead of a placeholder attempting to reproduce them.
 | Crop | Trim the loaded file down to the current selection |
 | Stretch | Open PaulXStretch (extreme time-stretch) |
 
-> 🖼️ **[SCREENSHOT 4 — Transport row, annotated with labels for each of
-> the six icons: Play/Pause, Stop, REPEAT, LOOP, Crop, Stretch]**
-> An annotated capture (arrows/labels pointing at each button) is more
-> useful here than the table alone — this row is the part of the UI
-> people will refer back to most often. Worth noting in the annotation:
-> the Stretch icon (calipers pulled apart by a double arrow) and the
-> Crop icon (corner brackets) sit right next to each other — a close
-> crop that makes the two easy to tell apart at a glance is worth the
-> extra care.
+<p align="center">
+  <img src="docs/images/04_fermaloop_transport_row.png" width="50%">
+</p>
+
 
 **LOOP vs. REPEAT — which one do I want?**
 
