@@ -28,7 +28,7 @@ Turn any short recording into a seamless, endless loop, or stretch it into a lon
 - Supported formats: WAV, AIFF, MP3, MP4/M4A, FLAC.
 
 <p align="left">
-  <img src="docs/images/02_fermaloop_file_controls.png" width="600">
+  <img src="docs/images/02_fermaloop_file_controls.png" width="550">
 </p>
 
 
