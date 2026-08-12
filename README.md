@@ -222,7 +222,7 @@ one to reassign it.
 | Stretch (open PaulXStretch) | X |
 
 <p align="center">
-  <img src="08_fermaloop_preferences_window.png" width="400">
+  <img src="docs/images/08_fermaloop_preferences_window.png" width="400">
 </p>
 
 ---
