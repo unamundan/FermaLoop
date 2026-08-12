@@ -207,6 +207,8 @@ Every shortcut below is remappable — click the ⚙ icon (top right) to open
 **Preferences and Help**, then click any shortcut's key and press a new
 one to reassign it.
 
+<div align="center">
+  
 | Action | Default key |
 |---|---|
 | Play / Pause | Space |
@@ -220,6 +222,8 @@ one to reassign it.
 | Zoom to Fit | 0 |
 | Zoom to Selection | 9 |
 | Stretch (open PaulXStretch) | X |
+
+</div>
 
 <p align="center">
   <img src="docs/images/08_fermaloop_preferences_window.png" width="400">
