@@ -83,7 +83,7 @@ a screenshot instead of a placeholder attempting to reproduce them.
 
 - **REPEAT**: plays the raw selection over and over, with just enough
   fade at the wrap point to prevent a click. Fast, no processing, but the
-  seam is still audibly "the end of a clip going back to the start."
+  seam is still audibly “the end of a clip going back to the start.”
 - **LOOP**: blends the tail of the selection into its head over an
   adjustable crossfade, so the wrap point is inaudible — the loop sounds
   continuous. This is what actually gets *processed* into the saved file.
@@ -111,7 +111,7 @@ stops audio.
   window, trims the selection to start/end right on the nearest strong
   attack instead of an arbitrary sample boundary.
 
-All three update the LOOP preview live while it's playing — no need to
+All three update the LOOP preview live while it’s playing — no need to
 stop and re-audition after changing a setting.
 
 ---
@@ -153,7 +153,7 @@ FermaLoop’s stretch feature is a from-scratch reimplementation of the
 core algorithm behind **Paul’s Extreme Sound Stretch**, created by
 [Nasca Octavian Paul](https://www.paulnasca.com/) — the original tool
 lives at [hypermammut.sourceforge.net/paulstretch](https://hypermammut.sourceforge.net/paulstretch/).
-The name "PaulXStretch" specifically nods to
+The name “PaulXStretch” specifically nods to
 [Xenakios](https://github.com/essej)'s modern continuation of the
 project, [PaulXStretch](https://sonosaurus.com/paulxstretch/) ([source](https://github.com/essej/paulxstretch)),
 which FermaLoop’s own feature is named after. No code is shared between
@@ -204,7 +204,7 @@ and PaulXStretch.
 ## Keyboard Shortcuts
 
 Every shortcut below is remappable — click the ⚙ icon (top right) to open
-**Preferences and Help**, then click any shortcut's key and press a new
+**Preferences and Help**, then click any shortcut’s key and press a new
 one to reassign it.
 
 <div align="center">
@@ -236,12 +236,12 @@ one to reassign it.
 - **No sound / playback controls greyed out**: the optional
   `sounddevice` package isn't installed — file processing and export
   still work without it.
-- **Drag-and-drop doesn't work**: the optional `tkinterdnd2` package
-  isn't installed — use **Browse** instead.
+- **Drag-and-drop doesn’t work**: the optional `tkinterdnd2` package
+  isn’t installed — use **Browse** instead.
 - **A Finder window briefly flashes on first launch or first file load
   (macOS only)**: this is normal, one-time macOS behavior tied to
   drag-and-drop and file-dialog initialization, not an app problem. It
-  doesn't recur on later launches.
+  doesn’t recur on later launches.
 
 ---
 
