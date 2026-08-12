@@ -1,5 +1,5 @@
-<p align="center">
-  <img src="docs/images/FermaLoop_Logotype.png" width="300">
+<p align="left">
+  <img src="docs/images/FermaLoop_Logotype.png" width="400">
 </p>
 
 # FermaLoop
