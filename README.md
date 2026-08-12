@@ -62,7 +62,7 @@ a screenshot instead of a placeholder attempting to reproduce them.
 
 <div align="center">
 
-| Button | Action |
+| BUTTON | ACTION |
 |---|---|
 | Play / Pause | Start or pause playback |
 | Stop | Stop playback |
