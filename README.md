@@ -124,7 +124,7 @@ ambient/drone material; rhythmic content will smear into texture, which
 is inherent to how the technique works, not a bug.
 
 <p align="center">
-  <img src="docs/images/06_fermaloop_paulxstretch_dialog.png" width="500">
+  <img src="docs/images/06_fermaloop_paulxstretch_dialog.png" width="450">
 </p>
 
 - Open it from the **Stretch** button, set the two values below, apply.
