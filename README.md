@@ -46,10 +46,9 @@ Turn any short recording into a seamless, endless loop, or stretch it into a lon
 - The small **✕** in the top-right corner of the waveform unloads the
   current file.
 
-> 🖼️ **[SCREENSHOT 3 — Close-up: selection with white edge bars visible,
-> plus the hover-time flag above the ruler]**
-> A cropped, zoomed-in shot works well here — this is a fine-detail
-> interaction that benefits from a close view more than the full window.
+<p align="center">
+  <img src="docs/images/03_fermaloop_selection_closeup.png" width="100%">
+</p>
 
 ---
 
